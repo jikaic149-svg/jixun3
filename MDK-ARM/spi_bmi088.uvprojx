@@ -615,6 +615,16 @@
               <FilePath>../Application/algorithm/crc16.c</FilePath>
             </File>
             <File>
+              <FileName>adrc_eso.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Application/algorithm/adrc_eso.c</FilePath>
+            </File>
+            <File>
+              <FileName>lqr_controller.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Application/algorithm/lqr_controller.c</FilePath>
+            </File>
+            <File>
               <FileName>ins_task.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Application/ins/ins_task.c</FilePath>

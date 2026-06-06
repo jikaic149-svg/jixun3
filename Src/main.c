@@ -107,7 +107,9 @@ int main(void)
   /* ===== 创建 FreeRTOS 任务 (必须在耗时的 INS_Init 之前) ===== */
   CAN_Filter_Init(); // 启动 CAN 滤波器和中断
 
-  /* 当前阶段只调试 BMI088/姿态滤波，禁止使能左右轮输出。 */
+  /* 唤醒左右轮电机：只enable，不输出电流。 */
+  Motor_Enable(LEFT_WHEEL_MOTOR_ID);
+  Motor_Enable(RIGHT_WHEEL_MOTOR_ID);
 
   FreeRTOS_Init();
 

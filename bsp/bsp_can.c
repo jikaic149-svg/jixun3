@@ -1,9 +1,49 @@
 #include "bsp_can.h"
+#include "FreeRTOS.h"
+#include "task.h"
 
 extern CAN_HandleTypeDef hcan1;
 
-Motor_Measure_t yaw_motor;   // Yaw 电机数据, id = 0x00
-Motor_Measure_t pitch_motor; // Pitch 电机数据, id = 0x01
+volatile Motor_Measure_t left_wheel_motor;   // 左轮反馈, id = 0x00
+volatile Motor_Measure_t right_wheel_motor;  // 右轮反馈, id = 0x01
+volatile uint32_t can_rx_count = 0U;
+volatile uint32_t can_wheel_rx_count = 0U;
+volatile uint32_t can_last_std_id = 0U;
+volatile uint32_t can_last_dlc = 0U;
+
+static int16_t can_read_i16_le(const uint8_t *data)
+{
+    return (int16_t)((uint16_t)data[0] | ((uint16_t)data[1] << 8));
+}
+
+static uint16_t can_read_u16_le(const uint8_t *data)
+{
+    return (uint16_t)((uint16_t)data[0] | ((uint16_t)data[1] << 8));
+}
+
+static uint32_t motor_feedback_tick_from_isr(void)
+{
+    if (xTaskGetSchedulerState() == taskSCHEDULER_NOT_STARTED) {
+        return HAL_GetTick();
+    }
+    return (uint32_t)xTaskGetTickCountFromISR();
+}
+
+static float motor_feedback_sign(uint8_t id)
+{
+    if (id == RIGHT_WHEEL_MOTOR_ID) {
+        return RIGHT_WHEEL_FEEDBACK_SIGN;
+    }
+    return LEFT_WHEEL_FEEDBACK_SIGN;
+}
+
+static float motor_current_sign(uint8_t id)
+{
+    if (id == RIGHT_WHEEL_MOTOR_ID) {
+        return RIGHT_WHEEL_CURRENT_SIGN;
+    }
+    return LEFT_WHEEL_CURRENT_SIGN;
+}
 
 /**
   * @brief  CAN1 滤波器配置与启动
@@ -78,6 +118,8 @@ void Motor_Disable(uint8_t id) {
   * @param  current: 目标电流 [-10A, 10A]
   */
 void Motor_SetCurrent(uint8_t id, float current) {
+    current *= motor_current_sign(id);
+
     // 限幅
     if (current > 10.0f) current = 10.0f;
     if (current < -10.0f) current = -10.0f;
@@ -101,6 +143,19 @@ void Motor_SetAngle(uint8_t id, float angle) {
     CAN_SendCommand(id, 0x05, (int16_t)value);
 }
 
+uint8_t Motor_FeedbackReady(const volatile Motor_Measure_t *motor,
+                            uint32_t now_tick,
+                            uint32_t timeout_ms)
+{
+    if (motor == NULL || motor->init_flag == 0U) {
+        return 0U;
+    }
+    if ((uint32_t)(now_tick - motor->last_rx_tick) > timeout_ms) {
+        return 0U;
+    }
+    return 1U;
+}
+
 /**
   * @brief  CAN 接收回调函数（在此处回传并解析编码器数值）
   * @param  hcan: CAN 句柄
@@ -110,25 +165,85 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan) {
         CAN_RxHeaderTypeDef rx_header;
         uint8_t rx_data[8];
         HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &rx_header, rx_data);
+
+        can_rx_count++;
+        can_last_std_id = rx_header.StdId;
+        can_last_dlc = rx_header.DLC;
         
         // 接收反馈帧ID: 0x500 + motor_id
         if (rx_header.StdId >= 0x500 && rx_header.StdId <= 0x508) {
-            Motor_Measure_t *motor = NULL;
+            can_wheel_rx_count++;
+            volatile Motor_Measure_t *motor = NULL;
             if (rx_header.StdId == 0x500) {
-                motor = &yaw_motor;
+                motor = &left_wheel_motor;
             } else if (rx_header.StdId == 0x501) {
-                motor = &pitch_motor;
+                motor = &right_wheel_motor;
             }
             
-            if (motor != NULL) {
-                // 完全参考 QGimbal 的方式，直接使用指针强转，抛弃复杂的累加处理
+            if (motor != NULL && rx_header.DLC >= 8U) {
+                float sign;
+                float angle;
+                float delta;
+                float elapsed_sec;
+                float speed_raw;
+                float speed_alpha;
+                uint32_t now_tick;
+                uint32_t elapsed_tick;
+                uint16_t encoder_raw;
+
+                sign = motor_feedback_sign((uint8_t)(rx_header.StdId - 0x500U));
+                now_tick = motor_feedback_tick_from_isr();
                 motor->enabled = rx_data[0] & 0x01;
-                motor->current = *(int16_t *)(rx_data + 2) * 10.0f / 32767.0f;
-                motor->speed   = *(int16_t *)(rx_data + 4) * 1000.0f / 32767.0f;
-                motor->angle   = *(uint16_t *)(rx_data + 6) * 360.0f / 65535.0f;  // 直接输出角度制 (0~360°)
-                
-                // 强制将 total_angle 设为直接等价，不需要自行累加了！
-                motor->total_angle = motor->angle;
+                motor->current = sign * can_read_i16_le(rx_data + 2) * 10.0f / 32767.0f;
+                motor->speed_can_rpm = sign * can_read_i16_le(rx_data + 4) * 1000.0f / 32767.0f;
+
+                encoder_raw = can_read_u16_le(rx_data + 6);
+                motor->encoder_raw = encoder_raw;
+                angle = encoder_raw * 360.0f / 65535.0f;
+                motor->angle = angle;
+
+                if (motor->init_flag == 0U) {
+                    motor->total_angle = 0.0f;
+                    motor->speed = 0.0f;
+                    motor->last_angle = angle;
+                    motor->speed_window_angle = 0.0f;
+                    motor->speed_window_tick = now_tick;
+                    motor->speed_ready = 0U;
+                    motor->init_flag = 1U;
+                } else {
+                    delta = angle - motor->last_angle;
+                    if (delta > 180.0f) {
+                        delta -= 360.0f;
+                    } else if (delta < -180.0f) {
+                        delta += 360.0f;
+                    }
+                    motor->total_angle += sign * delta;
+                    elapsed_tick = now_tick - motor->speed_window_tick;
+                    if (elapsed_tick >= pdMS_TO_TICKS(WHEEL_ENCODER_SPEED_WINDOW_MS)) {
+                        elapsed_sec = (float)elapsed_tick / (float)configTICK_RATE_HZ;
+                        speed_raw = (motor->total_angle - motor->speed_window_angle) *
+                                    (60.0f / 360.0f) / elapsed_sec;
+                        speed_alpha = WHEEL_ENCODER_SPEED_LPF_ALPHA;
+                        if (speed_alpha < 0.0f) {
+                            speed_alpha = 0.0f;
+                        } else if (speed_alpha > 1.0f) {
+                            speed_alpha = 1.0f;
+                        }
+
+                        if (motor->speed_ready == 0U) {
+                            motor->speed = speed_raw;
+                            motor->speed_ready = 1U;
+                        } else {
+                            motor->speed += speed_alpha * (speed_raw - motor->speed);
+                        }
+                        motor->speed_window_angle = motor->total_angle;
+                        motor->speed_window_tick = now_tick;
+                    }
+                    motor->last_angle = angle;
+                }
+
+                motor->rx_count++;
+                motor->last_rx_tick = now_tick;
             }
         }
     }

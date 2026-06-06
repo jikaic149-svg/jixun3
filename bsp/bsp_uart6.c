@@ -16,7 +16,7 @@
 static UART_HandleTypeDef huart6;
 static DMA_HandleTypeDef  hdma_usart6_tx;
 
-#define UART6_TX_BUF_SIZE 64U
+#define UART6_TX_BUF_SIZE 192U
 static uint8_t           tx_buf[UART6_TX_BUF_SIZE];
 static volatile uint8_t  tx_busy = 0;
 

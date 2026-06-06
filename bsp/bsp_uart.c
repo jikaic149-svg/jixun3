@@ -19,7 +19,7 @@ static UART_HandleTypeDef huart1;
 static DMA_HandleTypeDef  hdma_usart1_tx;
 
 /* ======================== 缓冲 / 状态 ======================== */
-#define UART1_TX_BUF_SIZE 128U
+#define UART1_TX_BUF_SIZE 192U
 static uint8_t           tx_buf[UART1_TX_BUF_SIZE];
 static volatile uint8_t  tx_busy = 0;
 

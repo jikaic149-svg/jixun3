@@ -32,5 +32,6 @@ bool Vofa_SendJustFloat(Vofa_Instance_t *inst,
 bool Vofa_SendCsvFloat(Vofa_Instance_t *inst,
                        const float *channels,
                        uint8_t channel_count);
+bool Vofa_SendText(Vofa_Instance_t *inst, const char *text);
 
 #endif /* VOFA_H */

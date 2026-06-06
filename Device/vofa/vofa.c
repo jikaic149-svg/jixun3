@@ -142,3 +142,25 @@ bool Vofa_SendCsvFloat(Vofa_Instance_t *inst,
     inst->tx_count++;
     return true;
 }
+
+bool Vofa_SendText(Vofa_Instance_t *inst, const char *text)
+{
+    uint16_t len;
+
+    if (inst == NULL || inst->send_bytes == NULL || text == NULL) {
+        return false;
+    }
+
+    len = (uint16_t)strlen(text);
+    if (len == 0U) {
+        return false;
+    }
+
+    if (!inst->send_bytes((const uint8_t *)text, len)) {
+        inst->tx_drop_count++;
+        return false;
+    }
+
+    inst->tx_count++;
+    return true;
+}

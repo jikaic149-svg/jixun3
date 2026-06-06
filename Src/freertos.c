@@ -6,7 +6,7 @@
  *          任务优先级 (值越大优先级越高):
  *          - INS_Task:  5 (高) — BMI088 1000Hz读取 + Kalman平衡角
  *          - BT_RxTask: 3 (中) — 蓝牙链路兼容占位
- *          - Gimbal_Task: 4 (中高) — 当前仅保持电机输出禁止
+ *          - Gimbal_Task: 4 (中高) — 电机保活/反馈监控/按键授权轮速测试
  *          - Idle:      0 (最低) — FreeRTOS 内建
  */
 
@@ -25,12 +25,12 @@ static TaskHandle_t gimbal_task_handle = NULL;
 
 #define INS_TASK_STACK_SIZE     512U    /* 2KB (含 Mahony 浮点运算) */
 #define BT_RX_TASK_STACK_SIZE   256U    /* 1KB */
-#define GIMBAL_TASK_STACK_SIZE  256U    /* 1KB 电机安全空转 */
+#define GIMBAL_TASK_STACK_SIZE  256U    /* 1KB 电机安全状态机 */
 
 /* ======================== 任务优先级 ======================== */
 
 #define INS_TASK_PRIORITY       5U      /* 最高: IMU 硬实时 */
-#define GIMBAL_TASK_PRIORITY    4U      /* 当前阶段: 禁止电机输出 */
+#define GIMBAL_TASK_PRIORITY    4U      /* 电机安全/按键/轮速P测试 */
 #define BT_RX_TASK_PRIORITY     3U      /* 中: 蓝牙链路占位 */
 
 /* ======================== 创建任务 ======================== */

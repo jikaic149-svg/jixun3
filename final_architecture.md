@@ -35,7 +35,7 @@ DJI C板和ESP32-S3低频无线同步空间位姿和任务状态，不进入实�
 1. 两个无刷电机作为平衡车驱动轮。
 2. 驱动轮通过CAN与DJI C板通信。
 3. DJI C板根据内置BMI088做LQR姿态闭环，实现直立。
-4. DJI C板对轮速做ADRC或等效执行层扰动抑制。
+4. DJI C板两轮执行层采用全速域统一PI + ESO / LADRC，不做高速/低速控制器切换。
 5. 灰度传感器 + BMI088姿态用于巡线和无黑线直走。
 6. yaw云台使用无刷电机。
 7. ESP32-S3通过外接CAN收发器接入CAN总线，控制yaw电机。
@@ -116,7 +116,7 @@ USB线不走滑环。
 ```text
 BMI088/编码器/灰度
   -> DJI C板
-  -> PID -> LQR -> ADRC串级控制
+  -> PID -> LQR -> PI+ESO/LADRC统一执行层
   -> 两轮无刷
 ```
 
@@ -171,7 +171,7 @@ MaixCam2计算score
 | 原始数据 | 采样节点 | 处理节点 | 处理结果 | 传输给谁 | 最终用途 |
 |---|---|---|---|---|---|
 | 底盘BMI088 | DJI C板 | DJI C板 | pitch、pitch_rate、yaw_rate | 本地使用，低频给S3 | LQR平衡、断线直走 |
-| 两轮电机反馈 | DJI C板 | DJI C板 | 轮速、电流、异常状态 | 本地使用 | 轮速ADRC、速度估计 |
+| 两轮电机反馈 | DJI C板 | DJI C板 | 轮速、电流、异常状态 | 本地使用 | PI+ESO/LADRC执行层、速度估计 |
 | 灰度阵列 | DJI C板 | DJI C板 | line_error、line_valid、mark_detected | 本地使用 | 巡线、标识点停车 |
 | USB图像帧 | MaixCam2 | MaixCam2 | target_center、laser_est、dx、dy、score、valid | Wi-Fi给S3 | 打靶视觉外环 |
 | 上层BMI088 | ESP32-S3 | ESP32-S3 | gyro、rate、disturbance | 本地使用，低频遥测 | yaw增稳、预测辅助 |
@@ -189,13 +189,14 @@ DJI C板负责底盘强实时闭环：
 
 ```text
 1. 底盘BMI088采样与姿态估计
-2. LQR平衡控制
-3. 两个驱动轮无刷电机控制
-4. 轮速ADRC或等效执行层扰动抑制
-5. 灰度巡线和无黑线直走
-6. 底盘空间位姿估计
-7. 标识点停车
-8. 底盘任务状态同步
+2. 编码器轮速、电机电流、故障状态读取
+3. LQR平衡控制
+4. 两个驱动轮无刷电机CAN电流/力矩控制
+5. 全速域统一PI + ESO / LADRC执行层扰动抑制
+6. 灰度巡线和无黑线直走
+7. 底盘空间位姿估计
+8. 标识点停车
+9. 底盘任务状态同步
 ```
 
 推荐频率：
@@ -204,34 +205,148 @@ DJI C板负责底盘强实时闭环：
 BMI088采样：1000Hz
 姿态估计：500Hz-1000Hz
 LQR平衡环：500Hz-1000Hz
-轮速/ADRC执行层：200Hz-500Hz
+PI+ESO/LADRC执行层：200Hz-500Hz
 灰度巡线PID：100Hz-200Hz
 底盘位姿同步无线发送：10Hz-30Hz
 ```
 
-底盘串级控制：
+底盘控制总结构：
 
 ```text
-外层：任务/巡线PID
-  输入：line_error、目标速度、断线直走航向
-  输出：v_ref、yaw_diff_ref
+传感器：
+  BMI088 + 编码器 + 灰度
+
+姿态估计：
+  Kalman -> theta, theta_dot
+
+外层：
+  速度PID / 位移PID / 巡线PID
+  -> v_ref, x_ref, yaw_cmd
 
 中层：LQR姿态控制
-  输入：pitch、pitch_rate、车速估计、位置/速度目标
-  输出：左右轮目标力矩或目标轮速修正
+  输入：theta、theta_dot、v、x、v_ref、x_ref
+  输出：u_LQR_L, u_LQR_R
 
-内层：轮速ADRC执行层
-  输入：最终left_ref、right_ref
-  输出：电机控制量/CAN命令
-  作用：跟踪轮端目标、抑制电机扰动、改善左右轮一致性
+内层：
+  全速域统一PI + ESO / LADRC
+  -> u_motor_L, u_motor_R
+
+执行：
+  CAN电流命令给左右无刷轮
 ```
 
-注意：
+核心原则：
 
 ```text
-PID -> LQR -> ADRC 是串级结构。
-LQR负责直立稳定，是底盘姿态稳定核心。
-ADRC服从LQR给出的轮端目标，不能高刚性、强积分地锁定固定轮速。
+不按高速/低速切换PI和ADRC。
+ESO始终打开，PI/LADRC始终存在。
+积分项根据平衡风险动态削弱。
+扰动补偿根据估计可信度动态限幅。
+LQR永远拥有最高控制优先级。
+当前姿态调试阶段仍禁止给驱动轮输出电流。
+```
+
+单轮简化对象：
+
+```text
+omega_dot = b0 * u + d
+
+omega：实际轮速
+u    ：电机电流/力矩控制命令
+b0   ：估计的电机响应增益
+d    ：总扰动
+```
+
+扰动d包含地面摩擦变化、轮胎打滑、坡度、电池电压下降、左右轮差异、重心变化、机械阻力和电机模型误差。
+
+ESO离散公式：
+
+```text
+e_eso = omega - z1
+
+z1 += dt * (z2 + b0 * u_last + beta1 * e_eso)
+z2 += dt * (beta2 * e_eso)
+
+beta1 = 2 * wo
+beta2 = wo * wo
+```
+
+说明：
+
+```text
+z1 ≈ omega
+z2 ≈ d
+wo越大，扰动估计越快，但越吃编码器噪声。
+wo越小，估计更稳，但补偿变慢。
+```
+
+PI + ESO / LADRC执行律：
+
+```text
+risk_theta = abs(theta) / theta_limit
+risk_rate  = abs(theta_dot) / theta_dot_limit
+risk = clamp(risk_theta + risk_rate, 0, 1)
+
+Ki_eff = Ki * (1 - risk)
+
+e_w = omega_ref - z1
+I += e_w * dt * (1 - risk)
+
+u0 = Kp * e_w + Ki_eff * I
+
+z2_used = limit(z2, -d_max, d_max)
+u_raw = (u0 - z2_used) / b0
+u = limit(u_raw, -u_max, u_max)
+```
+
+抗积分饱和：
+
+```text
+if abs(u_raw) > u_max:
+    I -= e_w * dt * (1 - risk)
+```
+
+更平滑的写法：
+
+```text
+I_dot = e_w * (1 - risk) - Kaw * (u_raw - u)
+I += I_dot * dt
+```
+
+LQR和执行层关系：
+
+```text
+优先方案：
+  LQR直接输出左右轮电流/力矩基准。
+  u_motor = limit(u_LQR - z2_used / b0, -u_max, u_max)
+
+备选方案：
+  omega_ref = f(u_LQR)
+  u_motor = PI_ESO(omega_ref, omega)
+```
+
+对平衡车，电流/力矩接口优先于轮速接口。平衡需要快速施加轮端力矩，不能让内层强行死追固定轮速并抢走LQR的救车权限。
+
+推荐最终公式链：
+
+```text
+theta, theta_dot = Kalman(acc, gyro)
+
+v = r / 2 * (omega_L + omega_R)
+
+theta_ref = PID_v(v_ref - v)
+
+X = [
+  theta - theta_ref
+  theta_dot
+  v - v_ref
+  x - x_ref
+]^T
+
+u_balance = -K * X
+
+u_LQR_L = u_balance - yaw_cmd
+u_LQR_R = u_balance + yaw_cmd
 ```
 
 ---
@@ -645,29 +760,41 @@ DJI C板收到完成状态后继续巡线。
 | USB线被yaw卷绕 | 摄像头掉线 | yaw软件±120°，机械±130° |
 | Wi-Fi占用S3资源 | 实时任务抖动 | 控制任务独立核心，Wi-Fi任务低优先级 |
 | 激光误开 | 安全风险 | 双条件授权，任一故障立即关闭 |
+| LQR未站稳就打开积分/ESO补偿 | 车体抢控制、恢复时猛冲 | 先Ki=0，ESO只观察，确认z2可信后再限幅补偿 |
+| 电机输出饱和但积分继续累加 | 脱离饱和后突然冲车 | 输出饱和时冻结积分或使用Kaw抗饱和 |
+| ESO扰动估计过激 | 高频抖动、轮端电流震荡 | z2必须限幅，wo从小到大调 |
 
 ---
 
 ## 15. 调试顺序
 
 ```text
-1. DJI C板完成底盘平衡。
-2. DJI C板完成巡线和标识点停车。
-3. ESP32-S3完成CAN收发器和yaw电机通信。
-4. ESP32-S3完成yaw编码器/电机反馈读取。
-5. ESP32-S3完成上层BMI088 1000Hz读取。
-6. ESP32-S3完成yaw角速度环。
-7. ESP32-S3完成yaw角度环。
-8. ESP32-S3完成pitch舵机控制。
-9. MaixCam2完成靶子ROI、角点、透视变换和靶心识别。
-10. MaixCam2完成Wi-Fi坐标包发送。
-11. ESP32-S3完成视觉坐标接收、滤波、age判断。
-12. 接入视觉外环控制yaw。
-13. ESP32-S3完成激光MOSFET控制。
-14. 接入锁定3秒逻辑。
-15. MaixCam2完成语音播报。
-16. DJI C板和ESP32-S3完成低频无线位姿同步。
-17. 联调完整任务流程。
+1. 当前阶段先完成BMI088 SPI 1000Hz读取、Kalman姿态、VOFA/蓝牙串口可视化。
+2. 保持驱动轮电机电流输出关闭，只验证pitch、yaw和编码器反馈。
+3. 完成CAN收发和左右轮反馈读取，但仍不下发驱动电流。
+4. 开始底盘闭环前，确认机械直立零点、pitch极性、左右轮方向和急停逻辑。
+5. 先关ESO补偿，Ki=0，只调LQR，让车能站住。
+6. 加速度外环PID，让车能慢速前后移动。
+7. 加转向/巡线yaw_cmd。
+8. 开ESO，只观察z1、z2，不参与补偿。
+9. z2波形可信后，逐步加入限幅扰动补偿。
+10. 最后开启Ki_eff，必须带平衡风险削弱和输出饱和保护。
+11. DJI C板完成巡线和标识点停车。
+12. ESP32-S3完成CAN收发器和yaw电机通信。
+13. ESP32-S3完成yaw编码器/电机反馈读取。
+14. ESP32-S3完成上层BMI088 1000Hz读取。
+15. ESP32-S3完成yaw角速度环。
+16. ESP32-S3完成yaw角度环。
+17. ESP32-S3完成pitch舵机控制。
+18. MaixCam2完成靶子ROI、角点、透视变换和靶心识别。
+19. MaixCam2完成Wi-Fi坐标包发送。
+20. ESP32-S3完成视觉坐标接收、滤波、age判断。
+21. 接入视觉外环控制yaw。
+22. ESP32-S3完成激光MOSFET控制。
+23. 接入锁定3秒逻辑。
+24. MaixCam2完成语音播报。
+25. DJI C板和ESP32-S3完成低频无线位姿同步。
+26. 联调完整任务流程。
 ```
 
 ---

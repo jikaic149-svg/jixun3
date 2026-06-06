@@ -12,6 +12,7 @@
 #include "ins_task.h"
 #include "main.h"
 #include <math.h>
+#include <stddef.h>
 
 /* Device 层 */
 #include "bmi088.h"
@@ -22,6 +23,7 @@
 #include "attitude_algorithm.h"
 #include "bsp_can.h"
 #include "config.h"
+#include "gimbal_task.h"
 
 /* BSP 层 (仅用于 Init 时注入函数指针) */
 #include "bsp_spi.h"
@@ -95,6 +97,21 @@ static void accel_read_over(const uint8_t *rx_buf, float accel_out[3]);
 static void temperature_read_over(const uint8_t *rx_buf, float *temp_out);
 static float calc_balance_accel_angle(const float accel[3]);
 static float select_gyro_axis(const float gyro_dps[3], uint8_t axis);
+static void vofa_rx_byte_callback(uint8_t byte);
+static uint8_t vofa_cmd_pop(uint8_t *line, uint8_t *len);
+static uint8_t vofa_parse_speed_cmd(const uint8_t *line, uint8_t len, float *rpm);
+
+#define VOFA_CMD_BUF_LEN    32U
+#define VOFA_CMD_QUEUE_LEN  16U
+
+static volatile uint8_t vofa_cmd_rx_len = 0U;
+static uint8_t vofa_cmd_rx_buf[VOFA_CMD_BUF_LEN];
+static volatile uint8_t vofa_cmd_head = 0U;
+static volatile uint8_t vofa_cmd_tail = 0U;
+static volatile uint8_t vofa_cmd_count = 0U;
+static volatile uint32_t vofa_cmd_overflow_count = 0U;
+static uint8_t vofa_cmd_queue[VOFA_CMD_QUEUE_LEN][VOFA_CMD_BUF_LEN];
+static uint8_t vofa_cmd_len_queue[VOFA_CMD_QUEUE_LEN];
 
 /* ======================== BSP <-> Device 粘合 ======================== */
 
@@ -115,8 +132,10 @@ void INS_Init(void)
     BSP_SPI_Init();
 #if VOFA_UART_PORT == VOFA_UART_PORT_USART6
     BSP_UART6_Init();
+    BSP_UART6_RegisterRxCallback(vofa_rx_byte_callback);
 #else
     BSP_UART1_Init();
+    BSP_UART1_RegisterRxCallback(vofa_rx_byte_callback);
 #endif
 
     Vofa_Init(&g_vofa, vofa_send_adapter);
@@ -173,7 +192,8 @@ void INS_Task(void *argument)
     /* 启动 DMA 模式 */
     imu_start_dma_flag = 1;
 
-    uint32_t vofa_send_divider = 0;
+    uint32_t vofa_last_send_tick = 0U;
+    uint8_t vofa_header_sent = 0U;
 
     for (;;)
     {
@@ -317,15 +337,74 @@ void INS_Task(void *argument)
         global_imu_yaw_speed = global_chassis_yaw_rate;
 
 #if VOFA_OUTPUT_ENABLE
-        vofa_send_divider++;
-        if (vofa_send_divider >= VOFA_OUTPUT_DIVIDER)
+        uint32_t now_tick = xTaskGetTickCount();
+        if ((uint32_t)(now_tick - vofa_last_send_tick) >= pdMS_TO_TICKS(VOFA_OUTPUT_PERIOD_MS))
         {
+#if VOFA_OUTPUT_MODE == VOFA_OUTPUT_MODE_ENCODER
+#if BALANCE_LQR_ENABLE
+#if BALANCE_LQR_OUTPUT_MODE == BALANCE_LQR_OUTPUT_MODE_SPEED
+            float vofa_channels[VOFA_OUTPUT_CHANNEL_COUNT] = {
+                balance_lqr_theta_deg,
+                balance_lqr_theta_rate_dps,
+                wheel_speed_ref_left_rpm,
+                0.5f * (wheel_speed_actual_left_rpm + wheel_speed_actual_right_rpm),
+                balance_lqr_output_left_a,
+                balance_lqr_output_right_a,
+                (float)chassis_fault_code
+            };
+            if (vofa_header_sent == 0U) {
+                (void)Vofa_SendText(&g_vofa,
+                                    "theta_deg,theta_rate_dps,rpm_ref,rpm_avg,l_u,r_u,fault\r\n");
+                vofa_header_sent = 1U;
+            }
+#else
+            float vofa_channels[VOFA_OUTPUT_CHANNEL_COUNT] = {
+                balance_lqr_theta_deg,
+                balance_lqr_theta_rate_dps,
+                balance_lqr_force_n,
+                balance_lqr_velocity_mps,
+                balance_lqr_output_left_a,
+                balance_lqr_output_right_a,
+                (float)chassis_fault_code
+            };
+            if (vofa_header_sent == 0U) {
+                (void)Vofa_SendText(&g_vofa,
+                                    "theta_deg,theta_rate_dps,force_n,v_mps,l_u,r_u,fault\r\n");
+                vofa_header_sent = 1U;
+            }
+#endif
+#else
+            float vofa_channels[VOFA_OUTPUT_CHANNEL_COUNT] = {
+                wheel_speed_ref_left_rpm,
+                wheel_speed_actual_left_rpm,
+                wheel_speed_output_left_a,
+                wheel_speed_ref_right_rpm,
+                wheel_speed_actual_right_rpm,
+                wheel_speed_output_right_a
+            };
+            if (vofa_header_sent == 0U) {
+                (void)Vofa_SendText(&g_vofa,
+                                    "l_ref,l_rpm,l_u,r_ref,r_rpm,r_u\r\n");
+                vofa_header_sent = 1U;
+            }
+#endif
+#elif VOFA_OUTPUT_MODE == VOFA_OUTPUT_MODE_CAN_DIAG
+            float vofa_channels[VOFA_OUTPUT_CHANNEL_COUNT] = {
+                (float)left_wheel_motor.enabled,
+                (float)right_wheel_motor.enabled,
+                (float)left_wheel_motor.rx_count,
+                (float)right_wheel_motor.rx_count,
+                (float)can_last_std_id,
+                (float)can_rx_count
+            };
+#else
             float vofa_channels[VOFA_OUTPUT_CHANNEL_COUNT] = {
                 kalman_angle_view,
                 yaw_kalman_angle
             };
+#endif
 
-            vofa_send_divider = 0U;
+            vofa_last_send_tick = now_tick;
             (void)Vofa_SendCsvFloat(&g_vofa,
                                     vofa_channels,
                                     VOFA_OUTPUT_CHANNEL_COUNT);
@@ -333,13 +412,15 @@ void INS_Task(void *argument)
 #endif
 
         /* ===== 指示灯: 急停红, 正常绿 ===== */
-        if (emergency_stop) {
+#if 0
+        if (0) {
             HAL_GPIO_WritePin(GPIOH, GPIO_PIN_12, GPIO_PIN_SET);    /* 红 */
             HAL_GPIO_WritePin(GPIOH, GPIO_PIN_11, GPIO_PIN_RESET);
-        } else {
+        } else if (0) {
             HAL_GPIO_WritePin(GPIOH, GPIO_PIN_11, GPIO_PIN_SET);    /* 绿 */
             HAL_GPIO_WritePin(GPIOH, GPIO_PIN_12, GPIO_PIN_RESET);
         }
+#endif
 
         /* 极端保护：如果由于瞬间并发数据塞爆了 RX_FIFO 导致 CAN 硬件报出 Overrun 错误锁死，
            我们必须强行清除错误并重新打开中断，否则后续永远进不了接收回调！ */
@@ -362,11 +443,147 @@ void BT_RxTask(void *argument)
     for (;;)
     {
         /* 当前阶段蓝牙只作为 VOFA+ TX 物理链路，本任务保留为兼容占位。 */
-        vTaskDelay(pdMS_TO_TICKS(50));
+        uint8_t line[VOFA_CMD_BUF_LEN];
+        uint8_t len;
+        float rpm;
+
+        while (vofa_cmd_pop(line, &len) != 0U) {
+            if (vofa_parse_speed_cmd(line, len, &rpm) != 0U) {
+                WheelSpeed_SetTargetRpm(rpm);
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(2));
     }
 }
 
 /* ======================== DMA 数据解析 (参考 QGimbal) ======================== */
+
+static void vofa_rx_byte_callback(uint8_t byte)
+{
+    uint8_t i;
+
+    if (byte == '\r') {
+        return;
+    }
+
+    if (byte == '\n') {
+        if (vofa_cmd_rx_len > 0U) {
+            if (vofa_cmd_count < VOFA_CMD_QUEUE_LEN) {
+                for (i = 0U; i < vofa_cmd_rx_len; i++) {
+                    vofa_cmd_queue[vofa_cmd_head][i] = vofa_cmd_rx_buf[i];
+                }
+                vofa_cmd_len_queue[vofa_cmd_head] = vofa_cmd_rx_len;
+                vofa_cmd_head++;
+                if (vofa_cmd_head >= VOFA_CMD_QUEUE_LEN) {
+                    vofa_cmd_head = 0U;
+                }
+                vofa_cmd_count++;
+            } else {
+                vofa_cmd_overflow_count++;
+            }
+        }
+        vofa_cmd_rx_len = 0U;
+        return;
+    }
+
+    if (vofa_cmd_rx_len < VOFA_CMD_BUF_LEN) {
+        vofa_cmd_rx_buf[vofa_cmd_rx_len++] = byte;
+    } else {
+        vofa_cmd_rx_len = 0U;
+        vofa_cmd_overflow_count++;
+    }
+}
+
+static uint8_t vofa_cmd_pop(uint8_t *line, uint8_t *len)
+{
+    uint8_t i;
+    uint8_t local_len;
+    uint8_t local_tail;
+
+    if (line == NULL || len == NULL) {
+        return 0U;
+    }
+
+    taskENTER_CRITICAL();
+    if (vofa_cmd_count == 0U) {
+        taskEXIT_CRITICAL();
+        return 0U;
+    }
+
+    local_tail = vofa_cmd_tail;
+    local_len = vofa_cmd_len_queue[local_tail];
+    for (i = 0U; i < local_len; i++) {
+        line[i] = vofa_cmd_queue[local_tail][i];
+    }
+    vofa_cmd_tail++;
+    if (vofa_cmd_tail >= VOFA_CMD_QUEUE_LEN) {
+        vofa_cmd_tail = 0U;
+    }
+    vofa_cmd_count--;
+    taskEXIT_CRITICAL();
+
+    *len = local_len;
+    return 1U;
+}
+
+static uint8_t vofa_parse_speed_cmd(const uint8_t *line, uint8_t len, float *rpm)
+{
+    uint8_t i = 0U;
+    uint8_t has_digit = 0U;
+    uint8_t has_frac = 0U;
+    float sign = 1.0f;
+    float value = 0.0f;
+    float frac_scale = 0.1f;
+
+    if (line == NULL || rpm == NULL || len == 0U) {
+        return 0U;
+    }
+
+    while (i < len) {
+        uint8_t c = line[i];
+        if (c == '+' || c == '-' || c == '.' || (c >= '0' && c <= '9')) {
+            break;
+        }
+        i++;
+    }
+
+    if (i >= len) {
+        return 0U;
+    }
+
+    if (line[i] == '-') {
+        sign = -1.0f;
+        i++;
+    } else if (line[i] == '+') {
+        i++;
+    }
+
+    while (i < len) {
+        uint8_t c = line[i];
+        if (c >= '0' && c <= '9') {
+            has_digit = 1U;
+            if (has_frac == 0U) {
+                value = value * 10.0f + (float)(c - '0');
+            } else {
+                value += (float)(c - '0') * frac_scale;
+                frac_scale *= 0.1f;
+            }
+        } else if (c == '.' && has_frac == 0U) {
+            has_frac = 1U;
+        } else {
+            break;
+        }
+        i++;
+    }
+
+    if (has_digit == 0U) {
+        return 0U;
+    }
+
+    *rpm = sign * value;
+    return 1U;
+}
 
 static void gyro_read_over(const uint8_t *rx_buf, float gyro_out[3])
 {
