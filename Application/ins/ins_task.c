@@ -1,0 +1,556 @@
+/**
+ * @file    ins_task.c
+ * @brief   Application层 — 平衡车 IMU/Kalman 姿态任务实现
+ * @note    整合 BMI088(Device) + Kalman角度滤波 + VOFA(Device)
+ *          参考 QGimbal: SPI DMA + EXTI DRDY 中断驱动 + TaskNotify 同步
+ *
+ *          运行模式:
+ *          1. 初始化阶段: SPI 轮询读写 BMI088 寄存器
+ *          2. 运行阶段:   EXTI DRDY → SPI DMA 读取 → TaskNotify → Kalman
+ */
+
+#include "ins_task.h"
+#include "main.h"
+#include <math.h>
+
+/* Device 层 */
+#include "bmi088.h"
+#include "bmi088_reg.h"
+#include "vofa.h"
+
+/* Algorithm 层 */
+#include "attitude_algorithm.h"
+#include "bsp_can.h"
+#include "config.h"
+
+/* BSP 层 (仅用于 Init 时注入函数指针) */
+#include "bsp_spi.h"
+#include "bsp_uart.h"
+#include "bsp_uart6.h"
+#include "bsp_delay.h"
+
+/* FreeRTOS */
+#include "FreeRTOS.h"
+#include "task.h"
+
+/* ======================== 跨任务暴露的全局变量 ======================== */
+float global_gimbal_yaw = 0.0f;
+float global_gimbal_pitch = 0.0f;
+float global_imu_yaw_speed = 0.0f;
+float global_imu_pitch_speed = 0.0f;
+float global_balance_angle = 0.0f;
+float global_balance_rate = 0.0f;
+float global_chassis_yaw = 0.0f;
+float global_chassis_yaw_rate = 0.0f;
+
+/* ======================== SPI DMA 缓冲区 (参考 QGimbal) ======================== */
+
+#define SPI_DMA_GYRO_LEN      8   /* 1(cmd) + 6(data) + 1(dummy) */
+#define SPI_DMA_ACCEL_LEN     9   /* 1(cmd) + 1(dummy) + 6(data) + 1 */
+#define SPI_DMA_TEMP_LEN      4   /* 1(cmd) + 1(dummy) + 2(data) */
+
+#define BMI088_GYRO_RX_BUF_DATA_OFFSET  1
+#define BMI088_ACCEL_RX_BUF_DATA_OFFSET 2
+
+static uint8_t gyro_dma_rx_buf[SPI_DMA_GYRO_LEN];
+static uint8_t gyro_dma_tx_buf[SPI_DMA_GYRO_LEN]  = {0x82, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+
+static uint8_t accel_dma_rx_buf[SPI_DMA_ACCEL_LEN];
+static uint8_t accel_dma_tx_buf[SPI_DMA_ACCEL_LEN] = {0x92, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+
+static uint8_t temp_dma_rx_buf[SPI_DMA_TEMP_LEN];
+static uint8_t temp_dma_tx_buf[SPI_DMA_TEMP_LEN]   = {0xA2, 0xFF, 0xFF, 0xFF};
+
+/* ======================== DMA 状态标志 (参考 QGimbal) ======================== */
+
+#define IMU_DR_SHFITS       0
+#define IMU_SPI_SHFITS      1
+#define IMU_UPDATE_SHFITS   2
+
+static volatile uint8_t gyro_update_flag = 0;
+static volatile uint8_t accel_update_flag = 0;
+static volatile uint8_t accel_temp_update_flag = 0;
+static volatile uint8_t imu_start_dma_flag = 0;
+
+/* ======================== 模块实例 ======================== */
+
+static BMI088_Instance_t    g_bmi088;
+static KalmanAngle_t        g_balance_kalman;
+static KalmanScalar_t       g_yaw_rate_kalman;
+static Vofa_Instance_t      g_vofa;
+
+/* INS 任务句柄 (用于 TaskNotify) */
+static TaskHandle_t ins_task_handle_local = NULL;
+
+/* IMU 数据 (DMA 解析后) */
+static float imu_gyro[3]  = {0};
+static float imu_accel[3] = {0};
+static float imu_temp     = 0.0f;
+
+/* ======================== 前向声明 ======================== */
+
+static void imu_cmd_spi_dma(void);
+static void gyro_read_over(const uint8_t *rx_buf, float gyro_out[3]);
+static void accel_read_over(const uint8_t *rx_buf, float accel_out[3]);
+static void temperature_read_over(const uint8_t *rx_buf, float *temp_out);
+static float calc_balance_accel_angle(const float accel[3]);
+static float select_gyro_axis(const float gyro_dps[3], uint8_t axis);
+
+/* ======================== BSP <-> Device 粘合 ======================== */
+
+static bool vofa_send_adapter(const uint8_t *data, uint16_t len)
+{
+#if VOFA_UART_PORT == VOFA_UART_PORT_USART6
+    return BSP_UART6_SendBytes(data, len);
+#else
+    return BSP_UART1_SendBytes(data, len);
+#endif
+}
+
+/* ======================== 初始化 ======================== */
+
+void INS_Init(void)
+{
+    /* ----- 1. BSP 初始化 ----- */
+    BSP_SPI_Init();
+#if VOFA_UART_PORT == VOFA_UART_PORT_USART6
+    BSP_UART6_Init();
+#else
+    BSP_UART1_Init();
+#endif
+
+    Vofa_Init(&g_vofa, vofa_send_adapter);
+
+    /* ----- 2. BMI088 初始化 (轮询模式，注入 BSP 函数指针) ----- */
+    BMI088_Config_t bmi_config = {
+        .spi_read_write = BSP_SPI_ReadWriteByte,
+        .accel_cs_low   = BSP_SPI_AccelCS_Low,
+        .accel_cs_high  = BSP_SPI_AccelCS_High,
+        .gyro_cs_low    = BSP_SPI_GyroCS_Low,
+        .gyro_cs_high   = BSP_SPI_GyroCS_High,
+        .delay_us       = BSP_Delay_Us,
+        .delay_ms       = BSP_Delay_Ms,
+    };
+
+    while (BMI088_Init(&g_bmi088, &bmi_config) != 0)
+    {
+        BSP_Delay_Ms(100);
+    }
+
+    /* ----- 3. 零飘校准 (已改为静态补偿，跳过阻塞 5 秒) ----- */
+    // BMI088_CalibrateZeroDrift(&g_bmi088);
+    // g_bmi088.calib_start_tick = xTaskGetTickCount();
+
+    /* ----- 4. Kalman 滤波器初始化 ----- */
+    KalmanAngle_Init(&g_balance_kalman,
+                     BALANCE_KALMAN_Q_ANGLE,
+                     BALANCE_KALMAN_Q_BIAS,
+                     BALANCE_KALMAN_R_MEASURE);
+    KalmanScalar_Init(&g_yaw_rate_kalman,
+                      CHASSIS_YAW_RATE_KALMAN_Q,
+                      CHASSIS_YAW_RATE_KALMAN_R);
+
+    /* ----- 5. 切换到 SPI DMA 模式 (运行时高速读取) ----- */
+    BSP_SPI_DMA_Init();
+}
+
+/* ======================== INS 主任务 ======================== */
+
+/**
+ * @brief  INS FreeRTOS 任务 — 由 DRDY 中断 + SPI DMA 驱动
+ * @note   参考 QGimbal InsTask:
+ *         DRDY EXTI → SPI DMA 传输 → DMA完成中断 → TaskNotify → Kalman
+ *         实际频率由 BMI088 DRDY 决定 (~1kHz for gyro)
+ *         DRDY/DMA未触发时使用SPI轮询降级，保证VOFA链路可见
+ */
+void INS_Task(void *argument)
+{
+    (void)argument;
+
+    /* 保存任务句柄用于 ISR 中的 TaskNotify */
+    ins_task_handle_local = xTaskGetCurrentTaskHandle();
+
+    /* 启动 DMA 模式 */
+    imu_start_dma_flag = 1;
+
+    uint32_t vofa_send_divider = 0;
+
+    for (;;)
+    {
+        uint8_t has_new_gyro = 0U;
+        float imu_dt_sec = BALANCE_IMU_DT_SEC;
+        static float imu_time_sec = 0.0f;
+#if IMU_POLL_FALLBACK_ENABLE
+        static uint32_t poll_fallback_divider = 0U;
+#endif
+
+        /* 等待 SPI DMA 完成通知；超时只用于让任务可恢复，不更新旧数据。 */
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
+
+        static float gyro_bias[3] = {0.0f, 0.0f, 0.0f};
+
+        /* 处理 DMA 读取完成的数据 */
+        if (gyro_update_flag & (1 << IMU_UPDATE_SHFITS))
+        {
+            gyro_update_flag &= ~(1 << IMU_UPDATE_SHFITS);
+            gyro_read_over(gyro_dma_rx_buf + BMI088_GYRO_RX_BUF_DATA_OFFSET, imu_gyro);
+
+            imu_gyro[0] -= gyro_bias[0];
+            imu_gyro[1] -= gyro_bias[1];
+            imu_gyro[2] -= gyro_bias[2];
+            has_new_gyro = 1U;
+        }
+
+        if (accel_update_flag & (1 << IMU_UPDATE_SHFITS))
+        {
+            accel_update_flag &= ~(1 << IMU_UPDATE_SHFITS);
+            accel_read_over(accel_dma_rx_buf + BMI088_ACCEL_RX_BUF_DATA_OFFSET, imu_accel);
+        }
+
+        if (accel_temp_update_flag & (1 << IMU_UPDATE_SHFITS))
+        {
+            accel_temp_update_flag &= ~(1 << IMU_UPDATE_SHFITS);
+            temperature_read_over(temp_dma_rx_buf + BMI088_ACCEL_RX_BUF_DATA_OFFSET, &imu_temp);
+        }
+
+        if (!has_new_gyro) {
+#if IMU_POLL_FALLBACK_ENABLE
+            poll_fallback_divider++;
+            if (poll_fallback_divider < IMU_POLL_FALLBACK_DIVIDER) {
+                continue;
+            }
+            poll_fallback_divider = 0U;
+
+            BMI088_Read(&g_bmi088);
+            imu_gyro[0] = g_bmi088.gyro[0] - gyro_bias[0];
+            imu_gyro[1] = g_bmi088.gyro[1] - gyro_bias[1];
+            imu_gyro[2] = g_bmi088.gyro[2] - gyro_bias[2];
+            imu_accel[0] = g_bmi088.accel[0];
+            imu_accel[1] = g_bmi088.accel[1];
+            imu_accel[2] = g_bmi088.accel[2];
+            imu_temp = g_bmi088.temperature;
+            imu_dt_sec = IMU_POLL_FALLBACK_DT_SEC * (float)IMU_POLL_FALLBACK_DIVIDER;
+#else
+            continue;
+#endif
+        }
+
+        /* 针对 BMI088 芯片特性进行坐标轴重映射（极其重要）
+         * BMI088 内部的加速度计和陀螺仪的坐标系是不同的！
+         * 根据数据手册：Gyro 的 Y、Z 轴方向与 Accel 的 Y、Z 轴刚好相反。
+         * 必须将它们统一到一个坐标系下，否则互补滤波会发生严重的轴耦合错乱。*/
+        float gx_deg = imu_gyro[0] * Rad2Ang;
+        float gy_deg = -imu_gyro[1] * Rad2Ang;
+        float gz_deg = -imu_gyro[2] * Rad2Ang;
+        float gyro_dps[3] = {gx_deg, gy_deg, gz_deg};
+        float accel_angle_raw = calc_balance_accel_angle(imu_accel) *
+                                BALANCE_ACCEL_ANGLE_SIGN -
+                                BALANCE_ANGLE_OFFSET_DEG;
+        static uint8_t accel_angle_lpf_ready = 0U;
+        static float accel_angle_lpf = 0.0f;
+        if (!accel_angle_lpf_ready) {
+            accel_angle_lpf = accel_angle_raw;
+            accel_angle_lpf_ready = 1U;
+        } else {
+            accel_angle_lpf += BALANCE_ACCEL_ANGLE_LPF_ALPHA *
+                               (accel_angle_raw - accel_angle_lpf);
+        }
+        float accel_angle = accel_angle_lpf;
+        float balance_rate = select_gyro_axis(gyro_dps, BALANCE_GYRO_AXIS) *
+                             BALANCE_GYRO_SIGN;
+        float yaw_rate_raw = select_gyro_axis(gyro_dps, CHASSIS_YAW_GYRO_AXIS) *
+                             CHASSIS_YAW_GYRO_SIGN;
+        float yaw_rate = yaw_rate_raw - CHASSIS_YAW_RATE_BIAS_DPS;
+        float yaw_rate_kalman = KalmanScalar_Update(&g_yaw_rate_kalman, yaw_rate);
+        static float yaw_raw_angle = 0.0f;
+        static float yaw_kalman_angle = 0.0f;
+        static uint8_t kalman_ready = 0U;
+#if BALANCE_BOOT_ZERO_ENABLE
+        static uint32_t zero_count = 0U;
+        static float accel_zero_sum = 0.0f;
+        static float kalman_zero_sum = 0.0f;
+        static float accel_zero = 0.0f;
+        static float kalman_zero = 0.0f;
+#else
+        const float accel_zero = 0.0f;
+        const float kalman_zero = 0.0f;
+#endif
+        float kalman_angle;
+        float accel_angle_view;
+        float kalman_angle_view;
+
+        if (!kalman_ready) {
+            KalmanAngle_SetAngle(&g_balance_kalman, accel_angle);
+            kalman_ready = 1U;
+        }
+
+        kalman_angle = KalmanAngle_Update(&g_balance_kalman,
+                                          accel_angle,
+                                          balance_rate,
+                                          imu_dt_sec);
+
+#if BALANCE_BOOT_ZERO_ENABLE
+        if (zero_count < 1000U) {
+            accel_zero_sum += accel_angle;
+            kalman_zero_sum += kalman_angle;
+            zero_count++;
+            accel_zero = accel_zero_sum / (float)zero_count;
+            kalman_zero = kalman_zero_sum / (float)zero_count;
+        }
+#endif
+
+        accel_angle_view = accel_angle - accel_zero;
+        kalman_angle_view = kalman_angle - kalman_zero;
+
+        imu_time_sec += imu_dt_sec;
+        global_balance_angle = kalman_angle_view;
+        global_balance_rate = KalmanAngle_GetRate(&g_balance_kalman);
+        yaw_raw_angle += yaw_rate * imu_dt_sec;
+        yaw_kalman_angle += yaw_rate_kalman * imu_dt_sec;
+
+        global_chassis_yaw_rate = yaw_rate_kalman;
+        global_chassis_yaw = yaw_kalman_angle;
+
+        global_gimbal_pitch = global_balance_angle;
+        global_gimbal_yaw = global_chassis_yaw;
+        global_imu_pitch_speed = global_balance_rate;
+        global_imu_yaw_speed = global_chassis_yaw_rate;
+
+#if VOFA_OUTPUT_ENABLE
+        vofa_send_divider++;
+        if (vofa_send_divider >= VOFA_OUTPUT_DIVIDER)
+        {
+            float vofa_channels[VOFA_OUTPUT_CHANNEL_COUNT] = {
+                kalman_angle_view,
+                yaw_kalman_angle
+            };
+
+            vofa_send_divider = 0U;
+            (void)Vofa_SendCsvFloat(&g_vofa,
+                                    vofa_channels,
+                                    VOFA_OUTPUT_CHANNEL_COUNT);
+        }
+#endif
+
+        /* ===== 指示灯: 急停红, 正常绿 ===== */
+        if (emergency_stop) {
+            HAL_GPIO_WritePin(GPIOH, GPIO_PIN_12, GPIO_PIN_SET);    /* 红 */
+            HAL_GPIO_WritePin(GPIOH, GPIO_PIN_11, GPIO_PIN_RESET);
+        } else {
+            HAL_GPIO_WritePin(GPIOH, GPIO_PIN_11, GPIO_PIN_SET);    /* 绿 */
+            HAL_GPIO_WritePin(GPIOH, GPIO_PIN_12, GPIO_PIN_RESET);
+        }
+
+        /* 极端保护：如果由于瞬间并发数据塞爆了 RX_FIFO 导致 CAN 硬件报出 Overrun 错误锁死，
+           我们必须强行清除错误并重新打开中断，否则后续永远进不了接收回调！ */
+        extern CAN_HandleTypeDef hcan1;
+        if (hcan1.ErrorCode != HAL_CAN_ERROR_NONE) {
+            hcan1.ErrorCode = HAL_CAN_ERROR_NONE;
+            __HAL_CAN_CLEAR_FLAG(&hcan1, CAN_FLAG_FOV0);
+            __HAL_CAN_CLEAR_FLAG(&hcan1, CAN_FLAG_FOV1);
+            HAL_CAN_ActivateNotification(&hcan1, CAN_IT_RX_FIFO0_MSG_PENDING);
+        }
+    }
+}
+
+/* ======================== 蓝牙接收任务 ======================== */
+
+void BT_RxTask(void *argument)
+{
+    (void)argument;
+
+    for (;;)
+    {
+        /* 当前阶段蓝牙只作为 VOFA+ TX 物理链路，本任务保留为兼容占位。 */
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+
+/* ======================== DMA 数据解析 (参考 QGimbal) ======================== */
+
+static void gyro_read_over(const uint8_t *rx_buf, float gyro_out[3])
+{
+    int16_t raw;
+    raw = (int16_t)((rx_buf[1] << 8) | rx_buf[0]);
+    gyro_out[0] = raw * BMI088_GYRO_2000_SEN;
+    raw = (int16_t)((rx_buf[3] << 8) | rx_buf[2]);
+    gyro_out[1] = raw * BMI088_GYRO_2000_SEN;
+    raw = (int16_t)((rx_buf[5] << 8) | rx_buf[4]);
+    gyro_out[2] = raw * BMI088_GYRO_2000_SEN;
+}
+
+static void accel_read_over(const uint8_t *rx_buf, float accel_out[3])
+{
+    int16_t raw;
+    raw = (int16_t)((rx_buf[1] << 8) | rx_buf[0]);
+    accel_out[0] = raw * BMI088_ACCEL_3G_SEN;
+    raw = (int16_t)((rx_buf[3] << 8) | rx_buf[2]);
+    accel_out[1] = raw * BMI088_ACCEL_3G_SEN;
+    raw = (int16_t)((rx_buf[5] << 8) | rx_buf[4]);
+    accel_out[2] = raw * BMI088_ACCEL_3G_SEN;
+}
+
+static void temperature_read_over(const uint8_t *rx_buf, float *temp_out)
+{
+    int16_t raw = (int16_t)((rx_buf[0] << 3) | (rx_buf[1] >> 5));
+    if (raw > 1023) raw -= 2048;
+    *temp_out = raw * BMI088_TEMP_FACTOR + BMI088_TEMP_OFFSET;
+}
+
+static float calc_balance_accel_angle(const float accel[3])
+{
+#if BALANCE_ACCEL_ANGLE_MODE == BALANCE_ACCEL_ANGLE_ROLL
+    return atan2f(accel[1], accel[2]) * Rad2Ang;
+#else
+    return atan2f(-accel[0],
+                  sqrtf(accel[1] * accel[1] + accel[2] * accel[2])) * Rad2Ang;
+#endif
+}
+
+static float select_gyro_axis(const float gyro_dps[3], uint8_t axis)
+{
+    if (axis == BALANCE_AXIS_Y) {
+        return gyro_dps[1];
+    }
+    if (axis == BALANCE_AXIS_Z) {
+        return gyro_dps[2];
+    }
+    return gyro_dps[0];
+}
+
+/* ======================== SPI DMA 调度 (参考 QGimbal) ======================== */
+
+/**
+ * @brief  根据标志位启动下一次 SPI DMA 传输
+ *         优先级: gyro > accel > temp
+ */
+static void imu_cmd_spi_dma(void)
+{
+    /* 陀螺仪 DMA */
+    if ((gyro_update_flag & (1 << IMU_DR_SHFITS))
+        && !(accel_update_flag & (1 << IMU_SPI_SHFITS))
+        && !(accel_temp_update_flag & (1 << IMU_SPI_SHFITS)))
+    {
+        gyro_update_flag &= ~(1 << IMU_DR_SHFITS);
+        gyro_update_flag |= (1 << IMU_SPI_SHFITS);
+
+        BSP_SPI_GyroCS_Low();
+        BSP_SPI_DMA_Enable((uint32_t)gyro_dma_tx_buf,
+                           (uint32_t)gyro_dma_rx_buf,
+                           SPI_DMA_GYRO_LEN);
+        return;
+    }
+
+    /* 加速度计 DMA */
+    if ((accel_update_flag & (1 << IMU_DR_SHFITS))
+        && !(gyro_update_flag & (1 << IMU_SPI_SHFITS))
+        && !(accel_temp_update_flag & (1 << IMU_SPI_SHFITS)))
+    {
+        accel_update_flag &= ~(1 << IMU_DR_SHFITS);
+        accel_update_flag |= (1 << IMU_SPI_SHFITS);
+
+        BSP_SPI_AccelCS_Low();
+        BSP_SPI_DMA_Enable((uint32_t)accel_dma_tx_buf,
+                           (uint32_t)accel_dma_rx_buf,
+                           SPI_DMA_ACCEL_LEN);
+        return;
+    }
+
+    /* 温度 DMA */
+    if ((accel_temp_update_flag & (1 << IMU_DR_SHFITS))
+        && !(gyro_update_flag & (1 << IMU_SPI_SHFITS))
+        && !(accel_update_flag & (1 << IMU_SPI_SHFITS)))
+    {
+        accel_temp_update_flag &= ~(1 << IMU_DR_SHFITS);
+        accel_temp_update_flag |= (1 << IMU_SPI_SHFITS);
+
+        BSP_SPI_AccelCS_Low();
+        BSP_SPI_DMA_Enable((uint32_t)temp_dma_tx_buf,
+                           (uint32_t)temp_dma_rx_buf,
+                           SPI_DMA_TEMP_LEN);
+        return;
+    }
+}
+
+/* ======================== EXTI DRDY 中断回调 ======================== */
+
+/**
+ * @brief  GPIO EXTI 回调 (HAL 框架调用)
+ *         PC4 = INT1_ACCEL (DRDY), PC5 = INT1_GYRO (DRDY)
+ *         参考 QGimbal: HAL_GPIO_EXTI_Callback
+ */
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+    if (GPIO_Pin == INT1_ACCEL_Pin)
+    {
+        accel_update_flag |= (1 << IMU_DR_SHFITS);
+        accel_temp_update_flag |= (1 << IMU_DR_SHFITS);
+        if (imu_start_dma_flag)
+            imu_cmd_spi_dma();
+    }
+    else if (GPIO_Pin == INT1_GRYO_Pin)
+    {
+        gyro_update_flag |= (1 << IMU_DR_SHFITS);
+        if (imu_start_dma_flag)
+            imu_cmd_spi_dma();
+    }
+}
+
+/* ======================== SPI DMA 完成回调 ======================== */
+
+/**
+ * @brief  SPI1 RX DMA 完成回调 (覆盖 BSP 弱定义)
+ *         参考 QGimbal: DMA2_Stream0_IRQHandler 内部逻辑
+ */
+void BSP_SPI_DMA_RxCpltCallback(void)
+{
+    /* 陀螺仪读取完成 */
+    if (gyro_update_flag & (1 << IMU_SPI_SHFITS))
+    {
+        gyro_update_flag &= ~(1 << IMU_SPI_SHFITS);
+        gyro_update_flag |= (1 << IMU_UPDATE_SHFITS);
+        BSP_SPI_GyroCS_High();
+    }
+
+    /* 加速度计读取完成 */
+    if (accel_update_flag & (1 << IMU_SPI_SHFITS))
+    {
+        accel_update_flag &= ~(1 << IMU_SPI_SHFITS);
+        accel_update_flag |= (1 << IMU_UPDATE_SHFITS);
+        BSP_SPI_AccelCS_High();
+    }
+
+    /* 温度读取完成 */
+    if (accel_temp_update_flag & (1 << IMU_SPI_SHFITS))
+    {
+        accel_temp_update_flag &= ~(1 << IMU_SPI_SHFITS);
+        accel_temp_update_flag |= (1 << IMU_UPDATE_SHFITS);
+        BSP_SPI_AccelCS_High();
+    }
+
+    /* 继续下一个 DMA 传输 */
+    imu_cmd_spi_dma();
+
+    /* 陀螺仪数据就绪时通知 INS 任务 */
+    if (gyro_update_flag & (1 << IMU_UPDATE_SHFITS))
+    {
+        if (ins_task_handle_local != NULL)
+        {
+            BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+            vTaskNotifyGiveFromISR(ins_task_handle_local, &xHigherPriorityTaskWoken);
+            portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+        }
+    }
+}
+
+/* ======================== 数据获取 ======================== */
+
+float INS_GetYaw(void)       { return Yaw_a; }
+float INS_GetPitch(void)     { return Pitch_a; }
+float INS_GetRoll(void)      { return Roll_a; }
+float INS_GetYawTotal(void)  { return Yaw_TotalAngle; }
+float INS_GetBalanceAngle(void) { return global_balance_angle; }
+float INS_GetBalanceRate(void) { return global_balance_rate; }
+float INS_GetChassisYaw(void) { return global_chassis_yaw; }
+float INS_GetChassisYawRate(void) { return global_chassis_yaw_rate; }
+uint8_t INS_IsCalibrated(void) { return g_bmi088.calibrated; }
