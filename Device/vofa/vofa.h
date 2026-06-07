@@ -9,10 +9,10 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#define VOFA_MAX_CHANNELS         12U
+#define VOFA_MAX_CHANNELS         16U
 #define VOFA_JUSTFLOAT_TAIL_SIZE  4U
 #define VOFA_JUSTFLOAT_BUF_SIZE   ((VOFA_MAX_CHANNELS * sizeof(float)) + VOFA_JUSTFLOAT_TAIL_SIZE)
-#define VOFA_TEXT_BUF_SIZE        160U
+#define VOFA_TEXT_BUF_SIZE        256U
 #define VOFA_TX_BUF_SIZE          VOFA_TEXT_BUF_SIZE
 
 typedef bool (*Vofa_SendBytes_t)(const uint8_t *data, uint16_t len);

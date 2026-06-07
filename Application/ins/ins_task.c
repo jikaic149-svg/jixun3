@@ -100,6 +100,7 @@ static float select_gyro_axis(const float gyro_dps[3], uint8_t axis);
 static void vofa_rx_byte_callback(uint8_t byte);
 static uint8_t vofa_cmd_pop(uint8_t *line, uint8_t *len);
 static uint8_t vofa_parse_speed_cmd(const uint8_t *line, uint8_t len, float *rpm);
+static uint8_t vofa_parse_bias_cmd(const uint8_t *line, uint8_t len, float *bias_deg);
 
 #define VOFA_CMD_BUF_LEN    32U
 #define VOFA_CMD_QUEUE_LEN  16U
@@ -346,31 +347,28 @@ void INS_Task(void *argument)
             float vofa_channels[VOFA_OUTPUT_CHANNEL_COUNT] = {
                 balance_lqr_theta_deg,
                 balance_lqr_theta_rate_dps,
-                wheel_speed_ref_left_rpm,
-                0.5f * (wheel_speed_actual_left_rpm + wheel_speed_actual_right_rpm),
-                balance_lqr_output_left_a,
-                balance_lqr_output_right_a,
+                balance_lqr_position_m,
+                balance_lqr_velocity_mps,
+                0.5f * (balance_lqr_output_left_a + balance_lqr_output_right_a),
                 (float)chassis_fault_code
             };
             if (vofa_header_sent == 0U) {
                 (void)Vofa_SendText(&g_vofa,
-                                    "theta_deg,theta_rate_dps,rpm_ref,rpm_avg,l_u,r_u,fault\r\n");
+                                    "theta_deg,theta_rate_dps,x_m,v_mps,u_avg_a,fault\r\n");
                 vofa_header_sent = 1U;
             }
 #else
             float vofa_channels[VOFA_OUTPUT_CHANNEL_COUNT] = {
                 balance_lqr_theta_deg,
                 balance_lqr_theta_rate_dps,
-                balance_lqr_force_n,
                 balance_lqr_position_m,
                 balance_lqr_velocity_mps,
-                balance_lqr_output_left_a,
-                balance_lqr_output_right_a,
+                0.5f * (balance_lqr_output_left_a + balance_lqr_output_right_a),
                 (float)chassis_fault_code
             };
             if (vofa_header_sent == 0U) {
                 (void)Vofa_SendText(&g_vofa,
-                                    "theta_deg,theta_rate_dps,force_n,x_m,v_mps,l_u,r_u,fault\r\n");
+                                    "theta_deg,theta_rate_dps,x_m,v_mps,u_avg_a,fault\r\n");
                 vofa_header_sent = 1U;
             }
 #endif
@@ -449,7 +447,9 @@ void BT_RxTask(void *argument)
         float rpm;
 
         while (vofa_cmd_pop(line, &len) != 0U) {
-            if (vofa_parse_speed_cmd(line, len, &rpm) != 0U) {
+            if (vofa_parse_bias_cmd(line, len, &rpm) != 0U) {
+                Balance_SetManualBiasDeg(rpm);
+            } else if (vofa_parse_speed_cmd(line, len, &rpm) != 0U) {
                 WheelSpeed_SetTargetRpm(rpm);
             }
         }
@@ -584,6 +584,39 @@ static uint8_t vofa_parse_speed_cmd(const uint8_t *line, uint8_t len, float *rpm
 
     *rpm = sign * value;
     return 1U;
+}
+
+static uint8_t vofa_parse_bias_cmd(const uint8_t *line, uint8_t len, float *bias_deg)
+{
+    uint8_t i = 0U;
+
+    if (line == NULL || bias_deg == NULL || len == 0U) {
+        return 0U;
+    }
+
+    while ((i < len) && line[i] == ' ') {
+        i++;
+    }
+
+    if (i >= len) {
+        return 0U;
+    }
+
+    if (line[i] == 'B' || line[i] == 'b') {
+        i++;
+        return vofa_parse_speed_cmd(line + i, (uint8_t)(len - i), bias_deg);
+    }
+
+    if ((i + 4U <= len) &&
+        (line[i] == 'b' || line[i] == 'B') &&
+        (line[i + 1U] == 'i' || line[i + 1U] == 'I') &&
+        (line[i + 2U] == 'a' || line[i + 2U] == 'A') &&
+        (line[i + 3U] == 's' || line[i + 3U] == 'S')) {
+        i += 4U;
+        return vofa_parse_speed_cmd(line + i, (uint8_t)(len - i), bias_deg);
+    }
+
+    return 0U;
 }
 
 static void gyro_read_over(const uint8_t *rx_buf, float gyro_out[3])

@@ -43,14 +43,22 @@ extern volatile float wheel_speed_pi_integral;
 extern volatile float wheel_speed_pi_integral_right;
 extern volatile float wheel_speed_target_rpm;
 extern volatile float balance_lqr_theta_deg;
+extern volatile float balance_lqr_theta_ref_deg;
+extern volatile float balance_lqr_zero_bias_deg;
 extern volatile float balance_lqr_theta_rate_dps;
 extern volatile float balance_lqr_position_m;
 extern volatile float balance_lqr_velocity_mps;
 extern volatile float balance_lqr_force_n;
+extern volatile float balance_lqr_force_x_n;
+extern volatile float balance_lqr_force_v_n;
+extern volatile float balance_lqr_force_theta_n;
+extern volatile float balance_lqr_force_rate_n;
 extern volatile float balance_lqr_output_left_a;
 extern volatile float balance_lqr_output_right_a;
+extern volatile uint8_t balance_zero_bias_frozen;
 
 extern void Gimbal_Task(void *argument);
 void WheelSpeed_SetTargetRpm(float rpm);
+void Balance_SetManualBiasDeg(float bias_deg);
 
 #endif /* GIMBAL_TASK_H */

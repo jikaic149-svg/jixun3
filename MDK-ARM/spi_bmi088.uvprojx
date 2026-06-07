@@ -625,6 +625,16 @@
               <FilePath>../Application/algorithm/lqr_controller.c</FilePath>
             </File>
             <File>
+              <FileName>balance_outer_loop.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Application/algorithm/balance_outer_loop.c</FilePath>
+            </File>
+            <File>
+              <FileName>balance_zero_bias_search.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Application/algorithm/balance_zero_bias_search.c</FilePath>
+            </File>
+            <File>
               <FileName>ins_task.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Application/ins/ins_task.c</FilePath>
