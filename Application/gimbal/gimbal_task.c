@@ -298,8 +298,8 @@ static void chassis_update_balance_view_zero_output(void)
 
     balance_lqr_theta_deg = global_balance_angle;
     balance_lqr_theta_rate_dps = global_balance_rate;
-    balance_lqr_position_m = balance_position_m;
-    balance_lqr_velocity_mps = velocity_mps;
+    balance_lqr_position_m = BALANCE_LQR_POSITION_SIGN * balance_position_m;
+    balance_lqr_velocity_mps = BALANCE_LQR_VELOCITY_SIGN * velocity_mps;
     balance_lqr_force_n = 0.0f;
     balance_lqr_output_left_a = 0.0f;
     balance_lqr_output_right_a = 0.0f;
@@ -527,8 +527,8 @@ static void chassis_calc_balance_lqr_output(float *left_current, float *right_cu
                                            BALANCE_LQR_POSITION_LIMIT_M);
 
 #if BALANCE_LQR_USE_WHEEL_STATE
-    velocity_state_mps = balance_velocity_lpf_mps;
-    position_state_m = balance_position_m;
+    velocity_state_mps = BALANCE_LQR_VELOCITY_SIGN * balance_velocity_lpf_mps;
+    position_state_m = BALANCE_LQR_POSITION_SIGN * balance_position_m;
 #else
     velocity_state_mps = 0.0f;
     position_state_m = 0.0f;
@@ -543,7 +543,7 @@ static void chassis_calc_balance_lqr_output(float *left_current, float *right_cu
                           velocity_state_mps,
                           0.0f,
                           theta_rad,
-                          0.0f,
+                          BALANCE_LQR_THETA_REF_DEG * BALANCE_DEG_TO_RAD,
                           theta_rate_rad_s);
 
     force_n = LQR_FixedGain_Update(&balance_lqr, x) *
@@ -597,8 +597,8 @@ static void chassis_calc_balance_lqr_output(float *left_current, float *right_cu
 
     balance_lqr_theta_deg = theta_deg;
     balance_lqr_theta_rate_dps = theta_rate_dps;
-    balance_lqr_position_m = balance_position_m;
-    balance_lqr_velocity_mps = balance_velocity_lpf_mps;
+    balance_lqr_position_m = position_state_m;
+    balance_lqr_velocity_mps = velocity_state_mps;
     balance_lqr_force_n = force_n;
     balance_lqr_output_left_a = left_out;
     balance_lqr_output_right_a = right_out;
@@ -615,8 +615,8 @@ static void chassis_calc_balance_lqr_output(float *left_current, float *right_cu
     wheel_speed_feedback_right_a = right_wheel_motor.current;
     wheel_speed_eso_z1_rpm = force_n;
     wheel_speed_eso_z2_rpm_s = avg_rpm;
-    wheel_speed_pi_integral = balance_position_m;
-    wheel_speed_pi_integral_right = balance_velocity_lpf_mps;
+    wheel_speed_pi_integral = position_state_m;
+    wheel_speed_pi_integral_right = velocity_state_mps;
 
     *left_current = left_out;
     *right_current = right_out;

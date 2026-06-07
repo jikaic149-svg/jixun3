@@ -362,6 +362,7 @@ void INS_Task(void *argument)
                 balance_lqr_theta_deg,
                 balance_lqr_theta_rate_dps,
                 balance_lqr_force_n,
+                balance_lqr_position_m,
                 balance_lqr_velocity_mps,
                 balance_lqr_output_left_a,
                 balance_lqr_output_right_a,
@@ -369,7 +370,7 @@ void INS_Task(void *argument)
             };
             if (vofa_header_sent == 0U) {
                 (void)Vofa_SendText(&g_vofa,
-                                    "theta_deg,theta_rate_dps,force_n,v_mps,l_u,r_u,fault\r\n");
+                                    "theta_deg,theta_rate_dps,force_n,x_m,v_mps,l_u,r_u,fault\r\n");
                 vofa_header_sent = 1U;
             }
 #endif
