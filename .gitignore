@@ -15,9 +15,13 @@ MDK-ARM/*.uvguix.*
 
 # Logs and temporary files
 log.txt
+1.txt
+serial_capture.csv
 *.log
 *.tmp
 *.bak
+build/
+backup_*/
 
 # Python cache
 __pycache__/

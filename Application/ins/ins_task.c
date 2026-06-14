@@ -293,11 +293,9 @@ void INS_Task(void *argument)
         static float accel_zero = 0.0f;
         static float kalman_zero = 0.0f;
 #else
-        const float accel_zero = 0.0f;
         const float kalman_zero = 0.0f;
 #endif
         float kalman_angle;
-        float accel_angle_view;
         float kalman_angle_view;
 
         if (!kalman_ready) {
@@ -320,7 +318,6 @@ void INS_Task(void *argument)
         }
 #endif
 
-        accel_angle_view = accel_angle - accel_zero;
         kalman_angle_view = kalman_angle - kalman_zero;
 
         imu_time_sec += imu_dt_sec;
@@ -347,28 +344,28 @@ void INS_Task(void *argument)
             float vofa_channels[VOFA_OUTPUT_CHANNEL_COUNT] = {
                 balance_lqr_theta_deg,
                 balance_lqr_theta_rate_dps,
-                balance_lqr_position_m,
-                balance_lqr_velocity_mps,
+                balance_lqr_output_left_a,
+                balance_lqr_output_right_a,
                 0.5f * (balance_lqr_output_left_a + balance_lqr_output_right_a),
                 (float)chassis_fault_code
             };
             if (vofa_header_sent == 0U) {
                 (void)Vofa_SendText(&g_vofa,
-                                    "theta_deg,theta_rate_dps,x_m,v_mps,u_avg_a,fault\r\n");
+                                    "theta_deg,theta_rate_dps,u_left_a,u_right_a,u_avg_a,fault\r\n");
                 vofa_header_sent = 1U;
             }
 #else
             float vofa_channels[VOFA_OUTPUT_CHANNEL_COUNT] = {
                 balance_lqr_theta_deg,
                 balance_lqr_theta_rate_dps,
-                balance_lqr_position_m,
-                balance_lqr_velocity_mps,
+                balance_lqr_output_left_a,
+                balance_lqr_output_right_a,
                 0.5f * (balance_lqr_output_left_a + balance_lqr_output_right_a),
                 (float)chassis_fault_code
             };
             if (vofa_header_sent == 0U) {
                 (void)Vofa_SendText(&g_vofa,
-                                    "theta_deg,theta_rate_dps,x_m,v_mps,u_avg_a,fault\r\n");
+                                    "theta_deg,theta_rate_dps,u_left_a,u_right_a,u_avg_a,fault\r\n");
                 vofa_header_sent = 1U;
             }
 #endif

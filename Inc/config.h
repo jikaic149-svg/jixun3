@@ -138,8 +138,8 @@
 #define CHASSIS_FAULT_ENABLE                2U
 #define CHASSIS_FAULT_LQR_ANGLE             3U
 #define CHASSIS_FAULT_LQR_RATE              4U
-#define BALANCE_LQR_CURRENT_LIMIT_A         0.60f
-#define BALANCE_LQR_CURRENT_SLEW_A_PER_SEC  50.0f
+#define BALANCE_LQR_CURRENT_LIMIT_A         0.40f
+#define BALANCE_LQR_CURRENT_SLEW_A_PER_SEC  8.0f
 #define BALANCE_LQR_DISTURBANCE_SCHEDULE_ENABLE 0U
 #define BALANCE_LQR_DIST_THETA_DEG          2.5f
 #define BALANCE_LQR_DIST_RATE_DPS           120.0f
@@ -153,18 +153,18 @@
 #define BALANCE_LQR_SAFE_RATE_DPS           900.0f
 #define BALANCE_LQR_POSITION_LIMIT_M        0.30f
 #define BALANCE_LQR_VELOCITY_LPF_ALPHA      0.15f
-#define BALANCE_LQR_USE_WHEEL_STATE         1U
+#define BALANCE_LQR_USE_WHEEL_STATE         0U
 #define BALANCE_LQR_VELOCITY_LIMIT_MPS      1.5f
 #define BALANCE_LQR_SPEED_SOURCE_CAN        0U
 #define BALANCE_LQR_SPEED_SOURCE_ENCODER    1U
 #define BALANCE_LQR_SPEED_SOURCE            BALANCE_LQR_SPEED_SOURCE_CAN
 #define BALANCE_LQR_SPEED_REF_LIMIT_RPM     300.0f
 #define BALANCE_LQR_FORCE_TO_SPEED_RPM_PER_N 45.0f
-/* LKG hold baseline: Kx=0.30, Kv=0.30, Ktheta=0.35, Krate=0.05. */
+/* LKG hold baseline plus the added top wheel load. */
 #define BALANCE_LQR_K_X_SCALE               0.34f
 #define BALANCE_LQR_K_V_SCALE               0.36f
-#define BALANCE_LQR_K_THETA_SCALE           0.35f
-#define BALANCE_LQR_K_THETA_DOT_SCALE       0.05f
+#define BALANCE_LQR_K_THETA_SCALE           0.09f
+#define BALANCE_LQR_K_THETA_DOT_SCALE       0.006f
 #define BALANCE_LQR_X_RISK_GATE_ENABLE      0U
 #define BALANCE_LQR_X_GATE_THETA_DEG        2.0f
 #define BALANCE_LQR_X_GATE_RATE_DPS         80.0f
@@ -236,21 +236,23 @@
 #define BALANCE_LQR_STATE_THETA              2U
 #define BALANCE_LQR_STATE_THETA_DOT          3U
 
-#define BALANCE_TOTAL_MASS_KG                0.606f
+#define BALANCE_TOTAL_MASS_KG                0.7595f
 #define BALANCE_WHEEL_MOTOR_SINGLE_MASS_KG   0.1535f
 #define BALANCE_WHEEL_MOTOR_PAIR_MASS_KG     0.307f
 #define BALANCE_BASE_MASS_KG                 0.307f
-#define BALANCE_BODY_MASS_KG                 0.299f
+#define BALANCE_BODY_MASS_KG                 0.4525f
 
 #define BALANCE_BATTERY_MASS_KG              0.1789f
 #define BALANCE_C_BOARD_MASS_KG              0.038f
 #define BALANCE_PLA_FRAME_MASS_KG            0.083f
+#define BALANCE_TOP_WHEEL_MASS_KG            0.1535f
+#define BALANCE_TOP_WHEEL_COM_HEIGHT_M       0.070f
 
 #define BALANCE_WHEEL_RADIUS_M               0.031f
 #define BALANCE_HALF_TRACK_M                 0.083f
 #define BALANCE_TRACK_M                      0.166f
-#define BALANCE_BODY_COM_LENGTH_M            0.03522f
-#define BALANCE_BODY_PITCH_INERTIA_KGM2      0.00013f
+#define BALANCE_BODY_COM_LENGTH_M            0.04702f
+#define BALANCE_BODY_PITCH_INERTIA_KGM2      0.000327f
 
 /* 电池95mm长边沿左右方向，即沿pitch轴；重心约在零件1中心下方15mm。 */
 #define BALANCE_BATTERY_LENGTH_M             0.095f
@@ -286,7 +288,7 @@
  * 车前倾时轮子必须向前救车。
  * 如果方向反，只改整体符号，不要先改K。
  */
-#define BALANCE_LQR_FORCE_SIGN               (-1.0f)
+#define BALANCE_LQR_FORCE_SIGN               1.0f
 
 /*
  * 电流换算：
@@ -328,11 +330,11 @@
 #define BALANCE_ACCEL_ANGLE_ROLL     0
 #define BALANCE_ACCEL_ANGLE_PITCH    1
 
-/* 水平安装默认使用 Pitch 加速度角 + Y 轴陀螺仪角速度。 */
-#define BALANCE_ACCEL_ANGLE_MODE     BALANCE_ACCEL_ANGLE_PITCH
-#define BALANCE_ACCEL_ANGLE_SIGN     1.0f
-#define BALANCE_GYRO_AXIS            BALANCE_AXIS_Y
-#define BALANCE_GYRO_SIGN            -1.0f
+/* 当前板子安装方向：前后平衡角落在 Roll / X gyro 上。 */
+#define BALANCE_ACCEL_ANGLE_MODE     BALANCE_ACCEL_ANGLE_ROLL
+#define BALANCE_ACCEL_ANGLE_SIGN     (-1.0f)
+#define BALANCE_GYRO_AXIS            BALANCE_AXIS_X
+#define BALANCE_GYRO_SIGN            1.0f
 
 /* yaw 只用于底盘航向估计，现场如果方向反了只改符号。 */
 #define CHASSIS_YAW_GYRO_AXIS        BALANCE_AXIS_Z

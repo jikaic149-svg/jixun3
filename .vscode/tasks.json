@@ -1,0 +1,174 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "STM32: build",
+      "type": "shell",
+      "command": "D:/MAKE/make.exe",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": "$gcc"
+    },
+    {
+      "label": "STM32: clean",
+      "type": "shell",
+      "command": "D:/MAKE/make.exe",
+      "args": [
+        "clean"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "STM32: rebuild",
+      "dependsOrder": "sequence",
+      "dependsOn": [
+        "STM32: clean",
+        "STM32: build"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "STM32: flash",
+      "type": "shell",
+      "command": "D:/OPENOCD/xpack-openocd-0.12.0-7/bin/openocd.exe",
+      "args": [
+        "-f",
+        "interface/stlink.cfg",
+        "-f",
+        "target/stm32f4x.cfg",
+        "-c",
+        "adapter speed 1000",
+        "-c",
+        "program build/spi_bmi088.elf verify reset exit"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "STM32: build and flash",
+      "dependsOrder": "sequence",
+      "dependsOn": [
+        "STM32: build",
+        "STM32: flash"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "STM32: openocd server",
+      "type": "shell",
+      "command": "D:/OPENOCD/xpack-openocd-0.12.0-7/bin/openocd.exe",
+      "args": [
+        "-f",
+        "interface/stlink.cfg",
+        "-f",
+        "target/stm32f4x.cfg",
+        "-c",
+        "adapter speed 1000"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "Serial: list ports",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}/.vscode/serial-monitor.ps1"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
+    },
+    {
+      "label": "Serial: monitor VOFA",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}/.vscode/serial-monitor.ps1",
+        "-Port",
+        "${input:serialPort}",
+        "-BaudRate",
+        "115200"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
+    },
+    {
+      "label": "Serial: capture VOFA 10s",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}/.vscode/serial-monitor.ps1",
+        "-Port",
+        "${input:serialPort}",
+        "-BaudRate",
+        "115200",
+        "-DurationSec",
+        "${input:serialDurationSec}",
+        "-OutputPath",
+        "${workspaceFolder}/serial_capture.csv"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
+    }
+  ],
+  "inputs": [
+    {
+      "id": "serialPort",
+      "type": "promptString",
+      "description": "Serial port for VOFA output, for example COM3",
+      "default": "COM3"
+    },
+    {
+      "id": "serialDurationSec",
+      "type": "promptString",
+      "description": "Capture duration in seconds",
+      "default": "10"
+    }
+  ]
+}
