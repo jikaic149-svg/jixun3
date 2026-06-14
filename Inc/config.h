@@ -128,8 +128,11 @@
 
 #define KEY_DEBOUNCE_MS                     30U
 
-/* First balance stage: fixed-gain LQR only, no speed/line/yaw outer loop yet. */
+/* Balance inner loop mode: keep LQR as a fallback, use PID by default. */
 #define BALANCE_LQR_ENABLE                  1U
+#define BALANCE_CONTROL_MODE_LQR            0U
+#define BALANCE_CONTROL_MODE_PID            1U
+#define BALANCE_CONTROL_MODE                BALANCE_CONTROL_MODE_PID
 #define BALANCE_LQR_OUTPUT_MODE_CURRENT     0U
 #define BALANCE_LQR_OUTPUT_MODE_SPEED       1U
 #define BALANCE_LQR_OUTPUT_MODE             BALANCE_LQR_OUTPUT_MODE_CURRENT
@@ -140,6 +143,12 @@
 #define CHASSIS_FAULT_LQR_RATE              4U
 #define BALANCE_LQR_CURRENT_LIMIT_A         0.40f
 #define BALANCE_LQR_CURRENT_SLEW_A_PER_SEC  8.0f
+#define BALANCE_PID_CURRENT_LIMIT_A         0.40f
+#define BALANCE_PID_CURRENT_SLEW_A_PER_SEC  60.0f
+#define BALANCE_PID_KP_A_PER_DEG            0.030f
+#define BALANCE_PID_KI_A_PER_DEG_S          0.000f
+#define BALANCE_PID_KD_A_PER_DPS            0.00090f
+#define BALANCE_PID_INTEGRAL_LIMIT_DEG_S    8.0f
 #define BALANCE_LQR_DISTURBANCE_SCHEDULE_ENABLE 0U
 #define BALANCE_LQR_DIST_THETA_DEG          2.5f
 #define BALANCE_LQR_DIST_RATE_DPS           120.0f

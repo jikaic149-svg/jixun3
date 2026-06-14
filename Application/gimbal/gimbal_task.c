@@ -58,8 +58,10 @@ static float left_speed_last_output = 0.0f;
 static float right_speed_last_output = 0.0f;
 static float wheel_speed_target_ramp_rpm = 0.0f;
 static uint8_t wheel_speed_feedback_lpf_ready = 0U;
+#if BALANCE_CONTROL_MODE == BALANCE_CONTROL_MODE_LQR
 static LQR_FixedGain_t balance_lqr;
 static uint8_t balance_lqr_initialized = 0U;
+#endif
 static float balance_position_m = 0.0f;
 static float balance_velocity_lpf_mps = 0.0f;
 static float balance_lqr_last_left_a = 0.0f;
@@ -70,6 +72,9 @@ static BalanceOuterLoop_t balance_outer_loop;
 static uint8_t balance_outer_loop_initialized = 0U;
 static BalanceZeroBiasSearch_t balance_zero_bias_search;
 static uint8_t balance_zero_bias_initialized = 0U;
+#if BALANCE_CONTROL_MODE == BALANCE_CONTROL_MODE_PID
+static float balance_pid_integral_deg_s = 0.0f;
+#endif
 
 static float chassis_absf(float value)
 {
@@ -266,6 +271,7 @@ static BalanceZeroBiasSearch_Input_t chassis_zero_bias_input(float theta_deg,
     return input;
 }
 
+#if BALANCE_CONTROL_MODE == BALANCE_CONTROL_MODE_LQR
 static void chassis_balance_lqr_init_once(void)
 {
     static const float k[BALANCE_LQR_STATE_DIM] = {
@@ -284,6 +290,7 @@ static void chassis_balance_lqr_init_once(void)
         balance_lqr_initialized = 1U;
     }
 }
+#endif
 
 void WheelSpeed_SetTargetRpm(float rpm)
 {
@@ -402,7 +409,9 @@ static void chassis_reset_speed_ctrl(void)
 
 static void chassis_reset_balance_lqr(void)
 {
+#if BALANCE_CONTROL_MODE == BALANCE_CONTROL_MODE_LQR
     chassis_balance_lqr_init_once();
+#endif
     chassis_outer_loop_init_once();
     chassis_zero_bias_init_once();
     BalanceOuterLoop_Reset(&balance_outer_loop);
@@ -417,6 +426,9 @@ static void chassis_reset_balance_lqr(void)
     balance_lqr_last_left_a = 0.0f;
     balance_lqr_last_right_a = 0.0f;
     balance_velocity_lpf_ready = 0U;
+#if BALANCE_CONTROL_MODE == BALANCE_CONTROL_MODE_PID
+    balance_pid_integral_deg_s = 0.0f;
+#endif
     balance_lqr_theta_deg = global_balance_angle;
     balance_lqr_theta_ref_deg = 0.0f;
     balance_lqr_zero_bias_deg = balance_manual_bias_deg +
@@ -619,6 +631,197 @@ static void chassis_calc_speed_test_output(float *left_current, float *right_cur
     *right_current = right_out;
 }
 
+#if BALANCE_CONTROL_MODE == BALANCE_CONTROL_MODE_PID
+static void chassis_calc_balance_pid_output(float *left_current, float *right_current)
+{
+    float left_rpm;
+    float right_rpm;
+    float velocity_raw_mps;
+    float measured_velocity_mps;
+    float measured_position_m;
+    float velocity_alpha;
+    float theta_deg;
+    float theta_ref_deg;
+    float theta_rate_dps;
+    float theta_error_deg;
+    float current_unsat_a;
+    float current_target_a;
+    float current_each_a;
+    float max_current_step;
+    float left_out;
+    float right_out;
+    float avg_rpm;
+    float zero_bias_current_abs_a;
+    BalanceOuterLoop_Config_t outer_config;
+    BalanceOuterLoop_Input_t outer_input;
+    BalanceZeroBiasSearch_Config_t zero_bias_config;
+    BalanceZeroBiasSearch_Input_t zero_bias_input;
+
+    if (chassis_motor_state != CHASSIS_MOTOR_BALANCE_LQR) {
+        chassis_reset_balance_lqr();
+        chassis_update_balance_view_zero_output();
+        *left_current = 0.0f;
+        *right_current = 0.0f;
+        return;
+    }
+
+    chassis_outer_loop_init_once();
+    chassis_zero_bias_init_once();
+    outer_config = chassis_outer_loop_config();
+    zero_bias_config = chassis_zero_bias_config();
+
+    theta_deg = global_balance_angle;
+    theta_rate_dps = global_balance_rate;
+
+    if (chassis_absf(theta_deg) > BALANCE_LQR_SAFE_ANGLE_DEG) {
+        chassis_fault_code = CHASSIS_FAULT_LQR_ANGLE;
+        chassis_speed_test_armed = 0U;
+        emergency_stop = 1U;
+        chassis_reset_balance_lqr();
+        chassis_update_balance_view_zero_output();
+        *left_current = 0.0f;
+        *right_current = 0.0f;
+        return;
+    }
+
+    if (chassis_absf(theta_rate_dps) > BALANCE_LQR_SAFE_RATE_DPS) {
+        chassis_fault_code = CHASSIS_FAULT_LQR_RATE;
+        chassis_speed_test_armed = 0U;
+        emergency_stop = 1U;
+        chassis_reset_balance_lqr();
+        chassis_update_balance_view_zero_output();
+        *left_current = 0.0f;
+        *right_current = 0.0f;
+        return;
+    }
+
+    left_rpm = chassis_get_wheel_speed_rpm(&left_wheel_motor);
+    right_rpm = chassis_get_wheel_speed_rpm(&right_wheel_motor);
+    avg_rpm = 0.5f * (left_rpm + right_rpm);
+    velocity_raw_mps = avg_rpm * BALANCE_RPM_TO_MPS;
+    velocity_raw_mps = chassis_limit_abs(velocity_raw_mps,
+                                         BALANCE_LQR_VELOCITY_LIMIT_MPS);
+
+    velocity_alpha = chassis_clampf(BALANCE_LQR_VELOCITY_LPF_ALPHA, 0.0f, 1.0f);
+    if (balance_velocity_lpf_ready == 0U) {
+        balance_velocity_lpf_mps = velocity_raw_mps;
+        balance_velocity_lpf_ready = 1U;
+    } else {
+        balance_velocity_lpf_mps += velocity_alpha *
+                                    (velocity_raw_mps - balance_velocity_lpf_mps);
+    }
+
+    balance_position_m += balance_velocity_lpf_mps * BALANCE_LQR_DT_SEC;
+    balance_position_m = chassis_limit_abs(balance_position_m,
+                                           BALANCE_LQR_POSITION_LIMIT_M);
+
+    measured_velocity_mps = BALANCE_LQR_VELOCITY_SIGN * balance_velocity_lpf_mps;
+    measured_position_m = BALANCE_LQR_POSITION_SIGN * balance_position_m;
+
+    zero_bias_current_abs_a = chassis_zero_bias_current_abs(balance_lqr_last_left_a,
+                                                           balance_lqr_last_right_a);
+    outer_input = chassis_outer_loop_input(measured_position_m,
+                                           measured_velocity_mps,
+                                           theta_deg,
+                                           zero_bias_current_abs_a);
+    zero_bias_input = chassis_zero_bias_input(theta_deg,
+                                             theta_rate_dps,
+                                             measured_position_m,
+                                             measured_velocity_mps,
+                                             zero_bias_current_abs_a);
+    theta_ref_deg = balance_manual_bias_deg +
+                    BalanceOuterLoop_Update(&balance_outer_loop,
+                                            &outer_config,
+                                            &outer_input) +
+                    BalanceZeroBiasSearch_GetCandidate(&balance_zero_bias_search,
+                                                       &zero_bias_config,
+                                                       &zero_bias_input);
+    theta_error_deg = theta_deg - theta_ref_deg;
+
+    if (BALANCE_PID_KI_A_PER_DEG_S != 0.0f) {
+        balance_pid_integral_deg_s += theta_error_deg * BALANCE_LQR_DT_SEC;
+        balance_pid_integral_deg_s =
+            chassis_limit_abs(balance_pid_integral_deg_s,
+                              BALANCE_PID_INTEGRAL_LIMIT_DEG_S);
+    } else {
+        balance_pid_integral_deg_s = 0.0f;
+    }
+
+    current_unsat_a =
+        (BALANCE_PID_KP_A_PER_DEG * theta_error_deg +
+         BALANCE_PID_KI_A_PER_DEG_S * balance_pid_integral_deg_s +
+         BALANCE_PID_KD_A_PER_DPS * theta_rate_dps) *
+        BALANCE_LQR_FORCE_SIGN;
+    current_target_a = chassis_limit_abs(current_unsat_a,
+                                         BALANCE_PID_CURRENT_LIMIT_A);
+
+    if ((BALANCE_PID_KI_A_PER_DEG_S != 0.0f) &&
+        (current_target_a != current_unsat_a)) {
+        balance_pid_integral_deg_s -= theta_error_deg * BALANCE_LQR_DT_SEC;
+    }
+
+    max_current_step = BALANCE_PID_CURRENT_SLEW_A_PER_SEC *
+                       BALANCE_LQR_DT_SEC;
+    left_out = chassis_step_towards(balance_lqr_last_left_a,
+                                    current_target_a,
+                                    max_current_step);
+    right_out = chassis_step_towards(balance_lqr_last_right_a,
+                                     current_target_a,
+                                     max_current_step);
+
+    balance_lqr_last_left_a = left_out;
+    balance_lqr_last_right_a = right_out;
+    current_each_a = 0.5f * (left_out + right_out);
+
+    zero_bias_input.current_abs_a = chassis_zero_bias_current_abs(left_out, right_out);
+    BalanceZeroBiasSearch_Update(&balance_zero_bias_search,
+                                 &zero_bias_config,
+                                 &zero_bias_input);
+
+    balance_lqr_theta_deg = theta_deg;
+    balance_lqr_theta_ref_deg = theta_ref_deg;
+    balance_lqr_zero_bias_deg = balance_manual_bias_deg +
+                                BalanceZeroBiasSearch_GetBias(&balance_zero_bias_search);
+    balance_zero_bias_frozen = BalanceZeroBiasSearch_IsFrozen(&balance_zero_bias_search);
+    balance_lqr_theta_rate_dps = theta_rate_dps;
+    balance_lqr_position_m = measured_position_m;
+    balance_lqr_velocity_mps = measured_velocity_mps;
+    balance_lqr_force_x_n = 0.0f;
+    balance_lqr_force_v_n = 0.0f;
+    balance_lqr_force_theta_n =
+        (BALANCE_PID_KP_A_PER_DEG * theta_error_deg *
+         BALANCE_LQR_FORCE_SIGN) /
+        BALANCE_FORCE_TO_EACH_CURRENT_A_PER_N;
+    balance_lqr_force_rate_n =
+        (BALANCE_PID_KD_A_PER_DPS * theta_rate_dps *
+         BALANCE_LQR_FORCE_SIGN) /
+        BALANCE_FORCE_TO_EACH_CURRENT_A_PER_N;
+    balance_lqr_force_n = current_each_a /
+                          BALANCE_FORCE_TO_EACH_CURRENT_A_PER_N;
+    balance_lqr_output_left_a = left_out;
+    balance_lqr_output_right_a = right_out;
+
+    wheel_speed_ref_left_rpm = 0.0f;
+    wheel_speed_actual_left_rpm = left_rpm;
+    wheel_speed_output_left_a = left_out;
+    wheel_speed_ref_right_rpm = 0.0f;
+    wheel_speed_actual_right_rpm = right_rpm;
+    wheel_speed_output_right_a = right_out;
+    wheel_speed_encoder_left_rpm = left_wheel_motor.speed;
+    wheel_speed_encoder_right_rpm = right_wheel_motor.speed;
+    wheel_speed_feedback_left_a = left_wheel_motor.current;
+    wheel_speed_feedback_right_a = right_wheel_motor.current;
+    wheel_speed_eso_z1_rpm = balance_lqr_force_n;
+    wheel_speed_eso_z2_rpm_s = avg_rpm;
+    wheel_speed_pi_integral = balance_pid_integral_deg_s;
+    wheel_speed_pi_integral_right = current_target_a;
+
+    *left_current = left_out;
+    *right_current = right_out;
+}
+#endif
+
+#if BALANCE_CONTROL_MODE == BALANCE_CONTROL_MODE_LQR
 static void chassis_calc_balance_lqr_output(float *left_current, float *right_current)
 {
     float left_rpm;
@@ -930,12 +1133,17 @@ static void chassis_calc_balance_lqr_output(float *left_current, float *right_cu
     *left_current = left_out;
     *right_current = right_out;
 }
+#endif
 
 static void chassis_calc_motor_output(float *left_current, float *right_current)
 {
 #if BALANCE_LQR_ENABLE
     if (chassis_motor_state == CHASSIS_MOTOR_BALANCE_LQR) {
+#if BALANCE_CONTROL_MODE == BALANCE_CONTROL_MODE_PID
+        chassis_calc_balance_pid_output(left_current, right_current);
+#else
         chassis_calc_balance_lqr_output(left_current, right_current);
+#endif
         return;
     }
     chassis_update_balance_view_zero_output();
