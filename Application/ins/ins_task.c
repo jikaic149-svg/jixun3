@@ -344,28 +344,40 @@ void INS_Task(void *argument)
             float vofa_channels[VOFA_OUTPUT_CHANNEL_COUNT] = {
                 balance_lqr_theta_deg,
                 balance_lqr_theta_rate_dps,
-                balance_lqr_output_left_a,
-                balance_lqr_output_right_a,
-                0.5f * (balance_lqr_output_left_a + balance_lqr_output_right_a),
+                balance_lqr_theta_ref_deg,
+                balance_lqr_position_m,
+                balance_lqr_velocity_mps,
+                balance_lqr_force_theta_n,
+                balance_lqr_force_rate_n,
+                balance_lqr_force_n,
+                balance_lqr_current_target_a,
+                balance_lqr_current_cmd_a,
+                balance_lqr_current_feedback_a,
                 (float)chassis_fault_code
             };
             if (vofa_header_sent == 0U) {
                 (void)Vofa_SendText(&g_vofa,
-                                    "theta_deg,theta_rate_dps,u_left_a,u_right_a,u_avg_a,fault\r\n");
+                                    "theta_deg,theta_rate_dps,theta_ref_deg,x_m,v_mps,f_theta_n,f_rate_n,f_total_n,u_target_a,u_cmd_a,u_fb_a,fault\r\n");
                 vofa_header_sent = 1U;
             }
 #else
             float vofa_channels[VOFA_OUTPUT_CHANNEL_COUNT] = {
                 balance_lqr_theta_deg,
                 balance_lqr_theta_rate_dps,
-                balance_lqr_output_left_a,
-                balance_lqr_output_right_a,
-                0.5f * (balance_lqr_output_left_a + balance_lqr_output_right_a),
+                balance_lqr_theta_ref_deg,
+                balance_lqr_position_m,
+                balance_lqr_velocity_mps,
+                balance_lqr_force_theta_n,
+                balance_lqr_force_rate_n,
+                balance_lqr_force_n,
+                balance_lqr_current_target_a,
+                balance_lqr_current_cmd_a,
+                balance_lqr_current_feedback_a,
                 (float)chassis_fault_code
             };
             if (vofa_header_sent == 0U) {
                 (void)Vofa_SendText(&g_vofa,
-                                    "theta_deg,theta_rate_dps,u_left_a,u_right_a,u_avg_a,fault\r\n");
+                                    "theta_deg,theta_rate_dps,theta_ref_deg,x_m,v_mps,f_theta_n,f_rate_n,f_total_n,u_target_a,u_cmd_a,u_fb_a,fault\r\n");
                 vofa_header_sent = 1U;
             }
 #endif

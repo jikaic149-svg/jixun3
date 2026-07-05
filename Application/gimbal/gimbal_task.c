@@ -41,6 +41,9 @@ volatile float balance_lqr_force_x_n = 0.0f;
 volatile float balance_lqr_force_v_n = 0.0f;
 volatile float balance_lqr_force_theta_n = 0.0f;
 volatile float balance_lqr_force_rate_n = 0.0f;
+volatile float balance_lqr_current_target_a = 0.0f;
+volatile float balance_lqr_current_cmd_a = 0.0f;
+volatile float balance_lqr_current_feedback_a = 0.0f;
 volatile float balance_lqr_output_left_a = 0.0f;
 volatile float balance_lqr_output_right_a = 0.0f;
 volatile uint8_t balance_zero_bias_frozen = 0U;
@@ -117,6 +120,46 @@ static float chassis_step_towards(float current, float target, float max_step)
 
     delta = chassis_limit_abs(delta, max_step);
     return current + delta;
+}
+
+static float chassis_step_current_with_zero_unload(float current,
+                                                   float target,
+                                                   float normal_step,
+                                                   float zero_step)
+{
+    if (((current > 0.0f) && (target < 0.0f)) ||
+        ((current < 0.0f) && (target > 0.0f))) {
+        return chassis_step_towards(current, 0.0f, zero_step);
+    }
+
+    return chassis_step_towards(current, target, normal_step);
+}
+
+static float chassis_apply_min_effective_current(float target,
+                                                 float theta_deg,
+                                                 float theta_rate_dps)
+{
+    float abs_target = chassis_absf(target);
+    float state_active;
+
+    if (BALANCE_LQR_MIN_EFFECTIVE_CURRENT_A <= 0.0f ||
+        abs_target <= 0.0005f ||
+        abs_target >= BALANCE_LQR_MIN_EFFECTIVE_CURRENT_A) {
+        return target;
+    }
+
+    state_active =
+        (chassis_absf(theta_deg) >= BALANCE_LQR_MIN_EFFECTIVE_THETA_DEG ||
+         chassis_absf(theta_rate_dps) >= BALANCE_LQR_MIN_EFFECTIVE_RATE_DPS)
+            ? 1.0f
+            : 0.0f;
+
+    if (state_active <= 0.0f) {
+        return target;
+    }
+
+    return (target >= 0.0f) ? BALANCE_LQR_MIN_EFFECTIVE_CURRENT_A :
+                              -BALANCE_LQR_MIN_EFFECTIVE_CURRENT_A;
 }
 
 static float chassis_speed_feedforward(float ref_rpm)
@@ -429,6 +472,9 @@ static void chassis_reset_balance_lqr(void)
     balance_lqr_force_v_n = 0.0f;
     balance_lqr_force_theta_n = 0.0f;
     balance_lqr_force_rate_n = 0.0f;
+    balance_lqr_current_target_a = 0.0f;
+    balance_lqr_current_cmd_a = 0.0f;
+    balance_lqr_current_feedback_a = 0.0f;
     balance_lqr_output_left_a = 0.0f;
     balance_lqr_output_right_a = 0.0f;
 }
@@ -470,6 +516,10 @@ static void chassis_update_balance_view_zero_output(void)
     balance_lqr_force_v_n = 0.0f;
     balance_lqr_force_theta_n = 0.0f;
     balance_lqr_force_rate_n = 0.0f;
+    balance_lqr_current_target_a = 0.0f;
+    balance_lqr_current_cmd_a = 0.0f;
+    balance_lqr_current_feedback_a = 0.5f * (left_wheel_motor.current +
+                                             right_wheel_motor.current);
     balance_lqr_output_left_a = 0.0f;
     balance_lqr_output_right_a = 0.0f;
     wheel_speed_ref_left_rpm = 0.0f;
@@ -866,25 +916,39 @@ static void chassis_calc_balance_lqr_output(float *left_current, float *right_cu
                                          current_limit_a,
                                          current_slew_a_per_sec);
     current_each_a = 0.5f * (left_out + right_out);
+    balance_lqr_current_target_a = force_n * BALANCE_FORCE_TO_EACH_CURRENT_A_PER_N;
+    balance_lqr_current_target_a = chassis_limit_abs(balance_lqr_current_target_a,
+                                                     current_limit_a);
 #else
     {
         float max_current_step;
+        float zero_current_step;
 
         current_each_a = force_n * BALANCE_FORCE_TO_EACH_CURRENT_A_PER_N;
         current_each_a = chassis_limit_abs(current_each_a,
                                            current_limit_a);
+        current_each_a = chassis_apply_min_effective_current(current_each_a,
+                                                             theta_deg,
+                                                             theta_rate_dps);
+        current_each_a = chassis_limit_abs(current_each_a,
+                                           current_limit_a);
+        balance_lqr_current_target_a = current_each_a;
 
         left_out = current_each_a;
         right_out = current_each_a;
 
         max_current_step = current_slew_a_per_sec *
                            BALANCE_LQR_DT_SEC;
-        left_out = chassis_step_towards(balance_lqr_last_left_a,
-                                        left_out,
-                                        max_current_step);
-        right_out = chassis_step_towards(balance_lqr_last_right_a,
-                                         right_out,
-                                         max_current_step);
+        zero_current_step = BALANCE_LQR_CURRENT_ZERO_SLEW_A_PER_SEC *
+                            BALANCE_LQR_DT_SEC;
+        left_out = chassis_step_current_with_zero_unload(balance_lqr_last_left_a,
+                                                         left_out,
+                                                         max_current_step,
+                                                         zero_current_step);
+        right_out = chassis_step_current_with_zero_unload(balance_lqr_last_right_a,
+                                                          right_out,
+                                                          max_current_step,
+                                                          zero_current_step);
 
         balance_lqr_last_left_a = left_out;
         balance_lqr_last_right_a = right_out;
@@ -909,6 +973,9 @@ static void chassis_calc_balance_lqr_output(float *left_current, float *right_cu
     balance_lqr_force_v_n = force_v_n;
     balance_lqr_force_theta_n = force_theta_n;
     balance_lqr_force_rate_n = force_rate_n;
+    balance_lqr_current_cmd_a = 0.5f * (left_out + right_out);
+    balance_lqr_current_feedback_a = 0.5f * (left_wheel_motor.current +
+                                             right_wheel_motor.current);
     balance_lqr_output_left_a = left_out;
     balance_lqr_output_right_a = right_out;
 
