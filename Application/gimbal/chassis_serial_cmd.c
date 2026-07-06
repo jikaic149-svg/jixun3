@@ -317,20 +317,34 @@ uint8_t ChassisSerialCmd_HandleLine(const uint8_t *line, uint8_t len)
     ChassisMode_e mode;
     BalancePidRuntimeParam_e pid_param;
 
+    chassis_serial_cmd_rx_count++;
+
     if (cmd_parse_mode(line, len, &mode) != 0U) {
         Chassis_SetControlMode(mode);
+        chassis_serial_cmd_ok_count++;
+        chassis_serial_cmd_last_type = 1U;
+        chassis_serial_cmd_last_value = (float)mode;
         return 1U;
     }
     if (cmd_parse_bias(line, len, &value) != 0U) {
         Balance_SetManualBiasDeg(value);
+        chassis_serial_cmd_ok_count++;
+        chassis_serial_cmd_last_type = 2U;
+        chassis_serial_cmd_last_value = value;
         return 1U;
     }
     if (cmd_parse_pid(line, len, &pid_param, &value) != 0U) {
         Balance_SetPidRuntimeParam(pid_param, value);
+        chassis_serial_cmd_ok_count++;
+        chassis_serial_cmd_last_type = (uint8_t)(10U + (uint8_t)pid_param);
+        chassis_serial_cmd_last_value = value;
         return 1U;
     }
     if (cmd_parse_float(line, len, &value) != 0U) {
         WheelSpeed_SetTargetRpm(value);
+        chassis_serial_cmd_ok_count++;
+        chassis_serial_cmd_last_type = 3U;
+        chassis_serial_cmd_last_value = value;
         return 1U;
     }
 

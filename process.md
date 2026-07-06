@@ -1080,3 +1080,581 @@
 - 先手扶小角度确认阻尼和极性，再逐步增加刚度。
 - 只看真正直立附近 `|theta| < 10~15deg` 的闭环段；平放、翻倒和故障后的数据不用于 PID 判断。
 - 若方向正确但拉不住，优先看 `balance_ref_rpm` 是否打满、轮速实际是否跟上、电流是否碰到限幅，再决定调外环 P/D、速度内环等效刚度或电流限幅。
+
+## 2026-07-06 串口调参链路增强
+
+### 问题判断
+
+- 原 VOFA 串口 RX 只把 `\n` 当作命令结束，收到 `\r` 会直接丢弃。
+- 若串口助手或 VOFA 控件只发送回车 `\r`，命令不会入队执行，表现为 `P25/KD=0.5` 等在线调参没有生效。
+- 原 12 路 `BALANCE_CASCADE` 没有直接输出运行时 Kp/Kd/限流，是否调参成功只能间接猜。
+
+### 修改内容
+
+| 修改项 | 新逻辑 | 原因 |
+|---|---|---|
+| 命令结束符 | `\r` 或 `\n` 都触发入队 | 兼容 VOFA/串口助手不同换行设置 |
+| 串口命令计数 | 新增 `chassis_serial_cmd_rx_count/ok_count/last_type/last_value` | 便于确认命令是否收到、是否解析成功 |
+| BALANCE_CASCADE VOFA | 从 12 路增至 16 路，末尾新增 `runtime_kp,runtime_kd,runtime_current_limit_a,serial_cmd_ok_count` | 在线调参后可直接在 VOFA 看到参数变化和成功计数 |
+
+### 新增 VOFA 通道
+
+- I12 `runtime_kp`
+- I13 `runtime_kd`
+- I14 `runtime_current_limit_a`
+- I15 `serial_cmd_ok_count`
+
+## 2026-07-06 P35/D0.3 直立调参数据
+
+### 数据判断
+
+- 本组 `vofa+.csv` 为 16 路 `BALANCE_CASCADE` 数据，共 `5713` 行，约 `114.26s`。
+- 全程 `fault=0`，没有触发角度保护。
+- 串口调参链路正常：`serial_cmd_ok_count` 从 `2` 增加到 `6`；最终运行参数为 `runtime_kp=35`、`runtime_kd=0.300`、`runtime_current_limit_a=0.350`。
+- `Kp=35` 主要运行段从约 `2.86s` 持续到结束，约 `111s`。
+- 全闭环段统计：
+  - 平均 `|theta| ≈ 1.13deg`，最大 `|theta| = 24.03deg`。
+  - 平均 `|theta_rate| ≈ 6.9dps`。
+  - 平均 `|balance_ref_rpm| ≈ 42rpm`。
+  - 左右轮平均速度误差约 `17~18rpm`。
+  - 电流打满比例很低：左约 `0.2%`，右约 `0.3%`。
+- 最大角度出现在约 `20.14s`，`theta=-24.03deg`，同时 `accel=-41.5deg`、`balance_ref=-250rpm`，判断为一次明显外部扰动/快速动作；系统没有 fault，并在随后恢复。
+- `33s` 之后多数 10 秒窗口平均 `|theta|` 约 `0.7~1.3deg`，说明当前已进入可调参状态，不再是极性/传感器链路错误。
+
+### 当前结论
+
+- `P35/D0.3` 比 `P50/D0.3` 明显更稳，适合作为下一步调参基线。
+- 当前 D 仍偏保守；若想提高抗扰恢复和减少大扰动后的摆动，下一步优先试 `D0.4~D0.45`，不要先继续加 P。
+- 当前数据平均角度和 `theta_ref` 都接近 0，不能从这组数据强判机械重心明显偏前；重心偏置仍需结合手感和静止直立均值判断。
+
+## 2026-07-06 P35/D0.4 与 -2deg 偏置测试
+
+### 数据判断
+
+- 本组 `vofa+.csv` 为 16 路 `BALANCE_CASCADE` 数据，共 `8272` 行，约 `165.44s`。
+- 最终运行参数为 `runtime_kp=35`、`runtime_kd=0.400`、`runtime_current_limit_a=0.350`。
+- 全数据中 `fault=3` 共 `319` 行，分成两段：
+  - `6.02s~9.76s`：`Kp=14/D0.3`，触发前 `theta=-25.58deg`、`theta_rate=-212.6dps`，随后角度继续到约 `-81deg`。
+  - `26.36s~28.96s`：`Kp=35/D0.3`，触发前 `theta=29.98deg`、`theta_rate=255dps`。
+- `D0.4` 生效后没有再出现 fault。
+- `P35/D0.4` 在 `62.52s~107.00s` 段：平均 `|theta|≈0.82deg`，最大约 `6.28deg`。
+- 最终 `theta_ref=-2deg` 段（约 `148.60s~165.42s`）：
+  - 平均 `theta≈-2.02deg`，说明车能跟住 `-2deg` 目标偏置。
+  - 平均 `|theta-theta_ref|≈0.62deg`。
+  - 平均 `|theta_rate|≈4.1dps`。
+  - 平均 `|balance_ref_rpm|≈21.9rpm`。
+  - 左右轮平均速度误差约 `9~10rpm`。
+
+### 当前结论
+
+- `P35/D0.4` 明显优于 `P35/D0.3`，阻尼更好，后半段数据更干净。
+- `theta_ref=-2deg` 偏置能稳定跟住，说明如果手感上确实需要前/后倾补偿，`B` 偏置链路是可用的。
+- 但是否把 `-2deg` 固化为机械零点，还需要现场确认：如果加 `B-2` 后车明显更愿意站住、轮子平均速度/位置漂移更小，再考虑固化；否则只作为手动偏置测试结果。
+
+## 2026-07-06 固化当前直立调参基线
+
+### 参数修改
+
+| 参数 | 旧值 | 新值 | 原因 |
+|---|---:|---:|---|
+| `BALANCE_PID_ANGLE_KP_RPM_PER_DEG` | `14.00f` | `35.00f` | 固化当前稳定的角度 P 基线 |
+| `BALANCE_PID_RATE_KD_RPM_PER_DPS` | `0.300f` | `0.400f` | 固化当前阻尼更好的 D 参数 |
+| `BALANCE_ANGLE_OFFSET_DEG` | `0.0f` | `-2.0f` | 将 `B-2` 对应的重心/机械偏置写入固定角度零点；烧录后默认 `theta_ref=0` 即等效于此前手动 `B-2` |
+
+### 烧录后验证
+
+- 不再发送 `B-2`，保持默认 `B0`。
+- VOFA 中 `runtime_kp` 应为 `35`，`runtime_kd` 应为 `0.4`。
+- 直立静态附近 `theta_deg` 应接近 `0deg`，`balance_ref_rpm` 长期均值应接近 `0rpm`。
+
+## 2026-07-06 固化参数烧录后验证
+
+### 数据判断
+
+- 本组 `vofa+.csv` 为 16 路 `BALANCE_CASCADE` 数据，共 `1709` 行，约 `34.18s`。
+- 未发送串口调参命令：`serial_cmd_ok_count=0`。
+- 固化参数已生效：`runtime_kp=35`，`runtime_kd=0.400`，`runtime_current_limit_a=0.350`。
+- 全程 `fault=0`。
+- 全段均值：
+  - `theta_avg≈0.18deg`，`theta_ref_avg≈0.09deg`。
+  - 平均 `|theta-theta_ref|≈1.01deg`。
+  - `balance_ref_avg≈1.69rpm`，长期均值接近 0。
+  - 左右轮平均速度误差约 `11.6rpm/12.8rpm`。
+- 最后约 `5s` 安静段：
+  - `theta_avg≈0.30deg`。
+  - 平均 `|theta-theta_ref|≈0.37deg`。
+  - `balance_ref_avg≈3.6rpm`。
+- 约 `14.3s` 有一次明显外部扰动/快速动作：`accel` 瞬间到约 `55deg`，`theta_rate` 到约 `174dps`，`balance_ref` 打到 `250rpm`，但未触发 fault，并在约 `0.3s` 内回到小角度。
+
+### 当前结论
+
+- `BALANCE_ANGLE_OFFSET_DEG=-2.0f` 固化方向正确，默认 `B0` 已基本等效于此前手动 `B-2`。
+- 当前 `P35/D0.4/offset=-2` 可作为直立短站和轻推扰动测试基线。
+- 下一步不优先改偏置；若仍有回摆，再小幅试 `D0.45`，若小角度偏软再试 `P38~40`。
+
+## 2026-07-06 转向模式与位置/速度外环阶段
+
+### 转向模式验证
+
+- 最新完整转向测试中，`serial_cmd_ok_count` 按 `0 -> 1 -> 2 -> 3 -> 4` 变化，对应 `left -> stand -> right -> stand` 四条命令均被串口正确解析。
+- `left` 模式下左右轮目标出现 `-45/+45rpm` 差速；`right` 模式下出现 `+45/-45rpm` 差速；两次 `stand` 后差速均回到 0。
+- 新一轮转向测试全程 `fault=0`，转向段电流未饱和，姿态扰动小；若现场观察物理方向正确，则 `BALANCE_PID_LEFT_YAW_SIGN/BALANCE_PID_RIGHT_YAW_SIGN` 不再调整。
+
+### 用力推车数据判断
+
+- 用力外部推动测试中，出现多次 `fault=3`，均为角度超过安全阈值触发保护，不是反馈丢失。
+- 故障前典型状态：
+  - `theta_ref_deg` 已经接近原上限 `±2deg`。
+  - `balance_ref_rpm` 已经接近原上限 `±250rpm`。
+  - 左右轮实际平均速度可到约 `200~250rpm`。
+  - 电流没有长期打满 `0.35A`，说明当前首要问题不是轮速方向错误，而是外环/直立输出权限偏小。
+- 现有位置/速度外环已经工作：它由轮速估算速度，速度积分得到位置，再由 `position_error` 和 `speed_error` 计算 `theta_ref_deg`。
+- `theta_ref_deg` 不是由 pitch 角速度直接计算；pitch 角速度 `theta_rate_dps` 用于内层直立环 D 项阻尼。
+
+### 本次参数修改
+
+| 参数 | 旧值 | 新值 | 原因 |
+|---|---:|---:|---|
+| `BALANCE_PID_THETA_REF_LIMIT_DEG` | `2.0f` | `3.0f` | 放大位置/速度外环可给直立环的目标重心角权限 |
+| `BALANCE_PID_BALANCE_SPEED_LIMIT_RPM` | `250.0f` | `320.0f` | 原数据中 `balance_ref_rpm` 频繁顶到 `±250rpm`，需要给直立环更多速度目标余量 |
+
+### 下一步测试
+
+- 先不改轮速 PID/电流环响应，烧录后继续做 `stand` 模式外力推车测试。
+- 重点观察：
+  - `theta_ref_deg` 是否能用到新的 `±3deg` 范围。
+  - `balance_ref_rpm` 是否还长时间顶到 `±320rpm`。
+  - 实际轮速是否能跟随目标，电流是否接近 `0.35A`。
+- 若 `balance_ref_rpm` 提高后实际轮速仍明显跟不上、且电流仍偏小，再进入轮速响应调参；若电流已打满，则优先考虑电流/动力余量限制。
+
+## 2026-07-06 最新外环符号判断
+
+### 数据判断
+
+- 最新 `vofa+.csv` 共 `5054` 行，约 `50.5s`，全程 `fault=0`。
+- `theta_ref_deg` 未打到新上限：范围约 `-0.77deg ~ +1.11deg`。
+- `balance_ref_rpm` 也未打到 `±320rpm`：范围约 `-172rpm ~ +235rpm`。
+- 电流几乎未饱和，仅约 2 行触及 `0.35A`，说明这组数据不能支持“轮速输出能力已经不够”的结论。
+- 关键现象：
+  - 当实际平均轮速为正约 `+107rpm` 时，`theta_ref≈-0.77deg`，`balance_ref≈+136rpm`，控制仍在给正向速度目标。
+  - 当实际平均轮速为负约 `-111rpm` 时，`theta_ref≈+1.11deg`，`balance_ref≈-122rpm`，控制仍在给负向速度目标。
+- 这说明当前速度/位置外环符号会使 `balance_ref` 与已有速度同向，表现为“越推越跑”，不是单纯的轮速响应慢。
+
+### 当前结论
+
+- 下一步应优先翻转外环测量符号：
+  - `BALANCE_PID_POSITION_SIGN` 从 `1.0f` 改为 `(-1.0f)`。
+  - `BALANCE_PID_VELOCITY_SIGN` 从 `1.0f` 改为 `(-1.0f)`。
+- 暂时不改轮速 PID；修正外环符号后再看实际轮速是否还跟不上目标。
+
+## 2026-07-06 VOFA 改为外环极性诊断视图
+
+### 修改目的
+
+- 暂时不改 `BALANCE_PID_POSITION_SIGN/BALANCE_PID_VELOCITY_SIGN`，先只改 VOFA 输出。
+- 下一次 `stand` 模式推车时，直接观察位置/速度误差、`speed_theta_ref_deg`、`balance_ref_rpm` 与实际平均轮速的符号关系。
+- 目标是先确认“外环极性”而不是继续混合判断轮速响应。
+
+### 新 16 路通道
+
+| 通道 | 名称 | 含义 |
+|---:|---|---|
+| I0 | `theta_deg` | 当前车身 pitch 角 |
+| I1 | `theta_ref_deg` | 最终给直立环的目标角 |
+| I2 | `speed_theta_ref_deg` | 位置/速度外环贡献的目标角 |
+| I3 | `position_m` | 符号处理后的估计位置 |
+| I4 | `position_ref_m` | 目标位置 |
+| I5 | `position_error_m` | `position_ref_m - position_m` |
+| I6 | `velocity_mps` | 符号处理后的估计速度 |
+| I7 | `velocity_ref_mps` | 目标速度 |
+| I8 | `velocity_error_mps` | `velocity_ref_mps - velocity_mps` |
+| I9 | `balance_ref_rpm` | 直立角度环输出的平均轮速目标 |
+| I10 | `avg_ref_rpm` | 左右轮平均目标转速 |
+| I11 | `avg_actual_rpm` | 左右轮平均实际转速 |
+| I12 | `avg_cmd_a` | 左右轮平均电流命令 |
+| I13 | `fault` | 底盘故障码 |
+| I14 | `position_sign` | 编译期 `BALANCE_PID_POSITION_SIGN` |
+| I15 | `velocity_sign` | 编译期 `BALANCE_PID_VELOCITY_SIGN` |
+
+### 判断方法
+
+- 只测试 `stand`，不要发 `left/right/forward`。
+- 推车后若 `avg_actual_rpm` 为正，理想情况下外环应让 `balance_ref_rpm` 往反向抑制速度；若同向，说明速度/位置外环极性仍错误。
+- 看 `velocity_error_mps -> speed_theta_ref_deg -> balance_ref_rpm -> avg_actual_rpm` 这条链，比只看 `theta/theta_ref` 更直接。
+
+## 2026-07-06 翻转位置/速度外环符号
+
+### 数据依据
+
+- 使用外环极性诊断视图后，`position_sign=+1`、`velocity_sign=+1` 时，推车数据出现明确同向加速：
+  - `avg_actual_rpm > +15rpm` 的样本中，`balance_ref_rpm` 几乎总是同为正，平均约 `+86rpm`。
+  - `avg_actual_rpm < -15rpm` 的样本中，`balance_ref_rpm` 几乎总是同为负，平均约 `-66rpm`。
+- 故障前 `avg_actual_rpm` 可到 `+334rpm`，`balance_ref_rpm` 打到 `+320rpm`，说明外环/内环链路在继续推动车速，而不是刹车。
+
+### 参数修改
+
+| 参数 | 旧值 | 新值 | 原因 |
+|---|---:|---:|---|
+| `BALANCE_PID_POSITION_SIGN` | `1.0f` | `(-1.0f)` | 翻转位置测量方向，使位置误差回中方向正确 |
+| `BALANCE_PID_VELOCITY_SIGN` | `1.0f` | `(-1.0f)` | 翻转速度测量方向，使速度外环对已有速度产生反向制动 |
+
+### 下一步验证
+
+- 烧录后仍使用外环诊断 VOFA 通道，只测 `stand` 推车。
+- 期望现象：
+  - `I14 position_sign=-1`，`I15 velocity_sign=-1`。
+  - `avg_actual_rpm` 为正时，`balance_ref_rpm` 应倾向为负。
+  - `avg_actual_rpm` 为负时，`balance_ref_rpm` 应倾向为正。
+- 如果符号正确但速度仍刹不住，再判断是否需要调轮速响应或外环增益。
+
+## 2026-07-06 拆分测试：先只测速度环极性
+
+### 原因
+
+- 双 sign 翻转后，整车数据仍表现为 `balance_ref_rpm` 与 `avg_actual_rpm` 同向，且触发多次 `fault=3`。
+- 由于位置误差、车身大角度和速度误差混在一起，不能继续用整车大扰动直接判断两个 sign。
+- 先退回原始符号，并关闭位置 P，只保留速度项，逐个确认极性。
+
+### 临时参数
+
+| 参数 | 当前临时值 | 目的 |
+|---|---:|---|
+| `BALANCE_POSITION_KP_DEG_PER_M` | `0.0f` | 暂时关闭位置回中项，只测试速度外环 |
+| `BALANCE_POSITION_KV_DEG_PER_MPS` | `1.50f` | 保留速度项 |
+| `BALANCE_PID_POSITION_SIGN` | `1.0f` | 退回原始符号，后续单独验证 |
+| `BALANCE_PID_VELOCITY_SIGN` | `1.0f` | 退回原始符号，先验证速度项 |
+
+### 测试判据
+
+- 仍使用外环诊断 VOFA 16 路通道。
+- 只在 `stand` 模式下做小幅推车，不做大角度摔车测试。
+- 当前只看速度链：
+  - `velocity_mps`
+  - `velocity_error_mps`
+  - `speed_theta_ref_deg`
+  - `balance_ref_rpm`
+  - `avg_actual_rpm`
+- 若 `avg_actual_rpm` 与 `balance_ref_rpm` 仍长期同向，再只翻 `BALANCE_PID_VELOCITY_SIGN` 测一次。
+- 速度 sign 确认后，再恢复 `BALANCE_POSITION_KP_DEG_PER_M` 并单独测位置 sign。
+
+## 2026-07-06 速度极性单独测试结果与位置极性测试配置
+
+### 速度极性测试结果
+
+- `vofa+.csv` 为追加文件，前半段是旧的 `position_sign=-1/velocity_sign=-1` 数据，后半段才是本次 `+1/+1`、`KP_position=0` 的速度单独测试数据。
+- 最新 `+1/+1` 段从约 `idx=2485` 开始，持续约 `26.8s`，全程 `fault=0`。
+- 速度项表现：
+  - `avg_actual_rpm > 0` 时，`speed_theta_ref_deg < 0`。
+  - `avg_actual_rpm < 0` 时，`speed_theta_ref_deg > 0`。
+- 这说明速度外环的目标角方向符合“对已有速度产生反向重心修正”的预期，暂定 `BALANCE_PID_VELOCITY_SIGN=1.0f` 正确。
+- 但由于 `BALANCE_POSITION_KP_DEG_PER_M=0`，没有位置回中项，手感会比之前虚、不愿意回中心；这不代表直立环或速度 sign 错。
+
+### 位置极性测试配置
+
+| 参数 | 当前测试值 | 原因 |
+|---|---:|---|
+| `BALANCE_POSITION_KP_DEG_PER_M` | `1.00f` | 温和恢复位置回中，用于判断位置极性，避免直接回 `2.50f` 太激进 |
+| `BALANCE_POSITION_KV_DEG_PER_MPS` | `1.50f` | 保留已初步确认方向正确的速度阻尼 |
+| `BALANCE_PID_POSITION_SIGN` | `1.0f` | 先测试原始位置方向 |
+| `BALANCE_PID_VELOCITY_SIGN` | `1.0f` | 暂定速度方向正确 |
+
+### 下一步判据
+
+- 仍使用外环诊断 VOFA 通道。
+- 只测 `stand`，小幅推动后让车自己回中。
+- 若 `position_m` 偏正时，位置项应推动 `speed_theta_ref_deg` 朝让 `position_m` 回 0 的方向变化；实际判断仍以低速段、非大角度摔车段为准。
+- 如果恢复 `KP=1.0` 后出现明显越离中心越加速，再单独翻 `BALANCE_PID_POSITION_SIGN`，不要动 `VELOCITY_SIGN`。
+
+## 2026-07-06 关闭位置环并修复速度环
+
+### 修正判断
+
+- 前面对速度 sign 的判断只看了 `avg_actual_rpm` 与 `speed_theta_ref_deg` 的关系，不够完整。
+- 更可靠的判断应看完整链路最终输出：`avg_actual_rpm` 与 `balance_ref_rpm` 是否反向。
+- `KP_position=1.0/KV=1.5/sign=+1/+1` 的数据中，`avg_actual_rpm` 与 `balance_ref_rpm` 仍大多数同向，说明速度项进入内层 `theta_error = theta - theta_ref` 后，最终仍表现为助推。
+
+### 当前临时参数
+
+| 参数 | 当前值 | 目的 |
+|---|---:|---|
+| `BALANCE_POSITION_KP_DEG_PER_M` | `0.0f` | 关闭位置项，排除位置回中干扰 |
+| `BALANCE_POSITION_KV_DEG_PER_MPS` | `1.50f` | 只保留速度阻尼 |
+| `BALANCE_PID_POSITION_SIGN` | `1.0f` | 位置项关闭，暂不测试 |
+| `BALANCE_PID_VELOCITY_SIGN` | `(-1.0f)` | 修复速度项符号，验证是否能反向压速度 |
+
+### 下一步判据
+
+- 烧录后清空 VOFA 数据，只测 `stand` 小幅推车。
+- 期望：
+  - `I14 position_sign=1`。
+  - `I15 velocity_sign=-1`。
+  - `avg_actual_rpm > 0` 时，`balance_ref_rpm` 应倾向变负或至少明显小于旧版同向助推。
+  - `avg_actual_rpm < 0` 时，`balance_ref_rpm` 应倾向变正或至少明显小于旧版同向助推。
+- 若此配置手感明显能刹速度，再恢复位置项并单独测试 `POSITION_SIGN`。
+
+## 2026-07-06 打开位置环并加入加速度阻尼
+
+### 修改目的
+
+- 最新速度单独测试中，`VELOCITY_SIGN=-1` 后速度项方向更合理，但 `theta_ref_deg` 幅度仍偏小，推车后回中/刹停能力不足。
+- 本次恢复一个温和的位置回中项，同时增大速度阻尼，并加入基于轮速变化率的加速度阻尼，先让外环具备“速度刹住 + 位置回中”的完整能力。
+
+### 当前参数
+
+| 参数 | 当前值 | 说明 |
+|---|---:|---|
+| `BALANCE_POSITION_KP_DEG_PER_M` | `0.80f` | 温和打开位置环，不直接回到激进值 |
+| `BALANCE_POSITION_KV_DEG_PER_MPS` | `2.50f` | 增强速度阻尼，让推车后的目标倾角更明显 |
+| `BALANCE_POSITION_KA_DEG_PER_MPS2` | `0.10f` | 新增加速度阻尼，抑制速度继续发散 |
+| `BALANCE_POSITION_KI_DEG_PER_M_S` | `0.0f` | 暂不打开位置积分，避免低速慢漂时积累过量 |
+| `BALANCE_PID_POSITION_SIGN` | `1.0f` | 先使用原始位置方向 |
+| `BALANCE_PID_VELOCITY_SIGN` | `(-1.0f)` | 保持速度单独测试后的方向 |
+
+### 加速度阻尼实现
+
+- 使用已带符号的 `measured_velocity_mps` 做差分：
+  - `accel_raw_mps2 = (measured_velocity_mps - last_measured_velocity_mps) / dt`
+  - 再使用与速度相同的低通系数滤波。
+- 外环新增：
+  - `accel_error_mps2 = 0 - accel_lpf_mps2`
+  - `accel_theta_ref_deg = BALANCE_POSITION_KA_DEG_PER_MPS2 * accel_error_mps2`
+- 最终：
+  - `speed_theta_ref = Kp*position_error + Kv*speed_error + Ka*accel_error + Ki*position_integral`
+
+### VOFA 通道变更
+
+仍为 16 路外环诊断，但为了观察加速度阻尼，把两个在 `stand` 下基本恒为 0 的参考通道替换掉：
+
+| 通道 | 当前含义 |
+|---|---|
+| I0 | `theta_deg` |
+| I1 | `theta_ref_deg` |
+| I2 | `speed_theta_ref_deg` |
+| I3 | `position_m` |
+| I4 | `accel_mps2` |
+| I5 | `position_error_m` |
+| I6 | `velocity_mps` |
+| I7 | `accel_theta_ref_deg` |
+| I8 | `velocity_error_mps` |
+| I9 | `balance_ref_rpm` |
+| I10 | `avg_ref_rpm` |
+| I11 | `avg_actual_rpm` |
+| I12 | `avg_cmd_a` |
+| I13 | `fault` |
+| I14 | `position_sign` |
+| I15 | `velocity_sign` |
+
+### 下一步测试
+
+- 烧录后清空 VOFA 数据，只测 `stand`，先小幅推，再中等力度推。
+- 重点看：
+  - `fault` 是否仍为 0。
+  - `theta_ref_deg/speed_theta_ref_deg` 是否能到约 `1~2deg`，但不要长期打满 `3deg`。
+  - 推开后 `position_m` 是否能逐步回到 0 附近。
+  - `accel_theta_ref_deg` 是否只在速度变化瞬间起作用，不应长期占主要量。
+- 如果车开始越推越跑，优先单独翻 `BALANCE_PID_POSITION_SIGN`；如果只是刹不住，优先继续加 `KV` 或 `KA`。
+
+## 2026-07-06 回退为速度环优先调参
+
+### 原因
+
+- 调参顺序应先确认速度外环能把推车后的速度刹住，再打开位置环做回中。
+- 如果速度环和位置环同时打开，推车后的数据会混合位置误差、速度误差和车身姿态误差，不利于判断是速度阻尼不足、位置极性错误，还是位置 P 过大。
+
+### 当前速度环测试参数
+
+| 参数 | 当前值 | 说明 |
+|---|---:|---|
+| `BALANCE_POSITION_KP_DEG_PER_M` | `0.0f` | 再次关闭位置回中项 |
+| `BALANCE_POSITION_KV_DEG_PER_MPS` | `2.50f` | 保留较强速度阻尼 |
+| `BALANCE_POSITION_KA_DEG_PER_MPS2` | `0.10f` | 保留加速度阻尼 |
+| `BALANCE_POSITION_KI_DEG_PER_M_S` | `0.0f` | 关闭积分 |
+| `BALANCE_PID_POSITION_SIGN` | `1.0f` | 位置项关闭，暂不判断 |
+| `BALANCE_PID_VELOCITY_SIGN` | `(-1.0f)` | 保持当前速度方向 |
+
+### 测试目标
+
+- 只测 `stand`，不要求回到原点。
+- 允许 `position_m` 漂走，因为位置环已关闭。
+- 重点看推车后：
+  - `avg_actual_rpm` 是否能逐步衰减。
+  - `theta_ref_deg/speed_theta_ref_deg` 是否能到约 `1~2deg`，但不要长期打满 `3deg`。
+  - `fault` 是否保持 0。
+  - `accel_theta_ref_deg` 是否只在速度变化瞬间明显。
+- 速度环能稳定刹住后，再把 `BALANCE_POSITION_KP_DEG_PER_M` 从 `0.3~0.5` 小幅打开测试位置回中。
+
+## 2026-07-06 速度环增强一次
+
+### 数据依据
+
+- `KP_position=0/KV=2.5/KA=0.10/VELOCITY_SIGN=-1` 的数据中，`fault=0`，`theta_ref_deg` 未长期打满 `±3deg`，说明外环还有增益余量。
+- 近直立区间 `|theta| < 1deg` 时，`theta_ref_deg` 平均只有约 `0.2deg`，不足以明显改变内层直立环输出，推车后速度仍压不住。
+- 加速度阻尼瞬时最大可到约 `2.2deg`，说明 `KA=0.10` 对瞬态偏猛，但稳定速度段主要仍缺 `KV`。
+
+### 参数修改
+
+| 参数 | 旧值 | 新值 | 目的 |
+|---|---:|---:|---|
+| `BALANCE_POSITION_KP_DEG_PER_M` | `0.0f` | `0.0f` | 继续关闭位置回中，只调速度环 |
+| `BALANCE_POSITION_KV_DEG_PER_MPS` | `2.50f` | `3.50f` | 增强持续速度阻尼 |
+| `BALANCE_POSITION_KA_DEG_PER_MPS2` | `0.10f` | `0.05f` | 降低加速度瞬时尖峰，避免手感发冲 |
+
+### 下一步判据
+
+- 仍只测 `stand`，不要求回原点。
+- 期望小推后 `theta_ref_deg` 能更接近 `0.5~1.5deg`，中等推可到 `1.5~2.5deg`，但不要长期顶到 `3deg`。
+- 如果速度能衰减但开始前后摆，说明 `KV` 接近偏大或直立环 D 需要微调；如果仍刹不住，再考虑继续小幅加 `KV` 或检查轮速环输出余量。
+
+## 2026-07-06 速度环增强后回退
+
+### 数据/手感
+
+- `KV=3.50/KA=0.05` 后，主观手感“不对”。
+- 最新追加数据中出现 `fault=3` 段，车身角度最大到约 `40deg`，说明本次增强没有改善速度刹停，反而更容易把直立环带出安全区。
+- 近直立低速段 `theta_ref_deg` 仍只有约 `0.2deg`，但大扰动时车身实际角度远大于目标角，继续单纯加 `KV` 不一定能解决问题。
+
+### 回退参数
+
+| 参数 | 旧值 | 新值 | 目的 |
+|---|---:|---:|---|
+| `BALANCE_POSITION_KP_DEG_PER_M` | `0.0f` | `0.0f` | 位置环继续关闭 |
+| `BALANCE_POSITION_KV_DEG_PER_MPS` | `3.50f` | `2.50f` | 回到较温和速度阻尼 |
+| `BALANCE_POSITION_KA_DEG_PER_MPS2` | `0.05f` | `0.0f` | 暂时关闭加速度阻尼，避免瞬态项干扰判断 |
+
+### 下一步
+
+- 用纯速度环再测一组：`KP=0/KV=2.5/KA=0/VELOCITY_SIGN=-1`。
+- 若仍表现为越推越跑，应优先重新判断 `VELOCITY_SIGN`，不要继续盲目加 `KV`。
+- 判断时优先看小角度区间：`|theta| < 1deg` 时，`theta_ref_deg` 是否正在把 `theta_error = theta - theta_ref` 往减小轮速的方向推。
+
+## 2026-07-06 机械零点偏置微调
+
+### 参数修改
+
+| 参数 | 旧值 | 新值 | 原因 |
+|---|---:|---:|---|
+| `BALANCE_ANGLE_OFFSET_DEG` | `-2.0f` | `-2.5f` | 现场手感/静态直立均值判断重心偏置补偿不足，继续加大机械零点偏置 |
+
+### 下一步测试
+
+- 烧录后不发 `B` 命令，保持默认 `B0`，观察静止直立时 `theta_deg` 均值是否更接近 0、`balance_ref_rpm` 长期均值是否更接近 0。
+- 若出现反方向慢漂（车持续往另一侧走），说明过补，回调到 `-2.2f` 附近。
+
+## 2026-07-06 速度外环极性修正回 +1
+
+### 判断依据
+
+- `balance_ref_rpm` 与 `avg_actual_rpm` 同向不能作为正反馈证据：倒立摆是非最小相位系统，刹车时轮子必须先朝速度同方向加速，把车身甩成反向倾角，再靠倾角减速。此前据此把 `VELOCITY_SIGN` 翻成 `-1` 属于误判。
+- 符号推导：`VELOCITY_SIGN=-1` 时，正向速度 `v>0` → `measured_velocity=-v` → `speed_error=+v` → `speed_theta_ref=+KV*v`（前倾目标角）→ 车继续加速，是真正的正反馈。
+- 数据指纹吻合：`VELOCITY_SIGN=-1` 下把 `KV` 从 `2.5` 加到 `3.5`，结果更快触发 `fault=3`、角度冲到约 `40deg`——增益越大越发散是符号错误的典型特征。
+- `VELOCITY_SIGN=+1` 的单独测试数据本来就正确：`avg_actual_rpm>0` 时 `speed_theta_ref<0`（后仰刹车方向）。当时“刹不住”的真实原因是权限不足：近直立段 `speed_theta_ref` 仅约 `0.2deg`，位置环关闭无回中项，另有 `0.01m/s` 速度死区削弱小速度响应。
+
+### 参数修改
+
+| 参数 | 旧值 | 新值 | 原因 |
+|---|---:|---:|---|
+| `BALANCE_PID_VELOCITY_SIGN` | `(-1.0f)` | `1.0f` | 恢复负反馈：正速度产生负（后仰）目标角 |
+
+### 下一步测试
+
+- 保持 `KP_position=0 / KV=2.5 / KA=0`，只测 `stand` 小幅推车。
+- 新判据（不再用 `balance_ref` 与轮速同向与否）：
+  - `velocity_mps` 与 `speed_theta_ref_deg` 应反向（正速度 → 负目标角）。
+  - 推开后 `avg_actual_rpm` 应在 `1~3s` 内单调衰减。
+- 极性确认后若刹车仍弱，加 `KV`；此时加大 `KV` 应表现为刹得更狠而不是发散，本身就是符号正确的交叉验证。之后再以 `0.3~0.5` 小幅打开位置环单独验 `POSITION_SIGN`。
+
+## 2026-07-06 VELOCITY_SIGN=+1 验证通过：连续站立 86s
+
+### 数据判断（16 路外环诊断，5722 行，约 114.4s，`position_sign=+1 / velocity_sign=+1`，`KP_position=0/KV=2.5/KA=0`，offset=-2.5）
+
+- 两段闭环：`0~14.3s` 和 `19.1~105.3s`；第二段**连续闭环 86.2s 无故障**，是目前最长稳定段。
+- **速度外环极性判据全部通过**：
+  - `|vel|>0.05m/s` 的 2246 行中，`velocity_mps` 与 `speed_theta_ref_deg` 反向比例 **100%**，corr=-1.000，回归斜率 -2.500 deg/(m/s)，正好等于 `-KV`，链路完全按设计工作。
+  - 推车事件（峰值速度 ~0.3-0.46m/s）后速度大多在 **1~3s 内衰减到峰值 30% 以下**，能刹住。
+- 长段整体质量：平均 `|theta|≈1.09deg`，`theta` 均值 -0.02deg（offset=-2.5 补偿合适）；`speed_theta_ref` 最大 2.28deg 未顶满 3deg；电流饱和仅 1 行。
+- 位置环关闭下 `position_m` 顶在 ±0.30m 限幅上来回，属预期（无回中项）。
+- 两次 `fault=3`（14.3s、105.3s）都是**强推超出动力权限**，不是极性问题：故障前 `balance_ref` 已顶满 ±320rpm、实际轮速 ~287rpm、电流打到 0.35A，theta 在 0.1s 内从 ~10deg 冲过 30deg 保护线。这是权限极限，行为正常。
+
+### 当前结论
+
+- `BALANCE_PID_VELOCITY_SIGN=1.0f` 定案，不再动；"balance_ref 与轮速同向=正反馈"的旧判据正式作废。
+- `BALANCE_ANGLE_OFFSET_DEG=-2.5f` 表现合适（theta 长期均值≈0），暂不再调。
+- 下一步按既定路线：`BALANCE_POSITION_KP_DEG_PER_M` 从 `0.3~0.5` 温和打开位置环，单独验证 `POSITION_SIGN`。判据：推开后 `position_m` 应缓慢回向 0，而不是顶在 ±0.3m 限幅上不回。
+- 抗强推能力受 0.35A 电流限幅约束；若后续需要抗更大扰动，再讨论提限流，位置环验证阶段不动。
+
+## 2026-07-06 打开位置环验证 POSITION_SIGN
+
+### 打开原因（86s 长段数据的位移分析）
+
+- 直立和速度阻尼已成立，但速度不受控回零：把 `velocity_mps` 积分还原成真实位移，86s 内车在 `-0.36m ~ +2.46m` 间游走，净漂移 `+0.51m`。
+- 最长一次同方向移动持续 `7.1s`（另有 `5.3s`），对应现场"位移速度还在变大"的手感。
+- `position_m` 有 `22%` 时间顶在 `±0.30m` 限幅上——位置反馈看得见但没人用（`KP_position=0`）。
+- 速度阻尼只能衰减速度，无法消除稳态漂移；"直走后停车"必须位置闭环。
+
+### 参数修改
+
+| 参数 | 旧值 | 新值 | 原因 |
+|---|---:|---:|---|
+| `BALANCE_POSITION_KP_DEG_PER_M` | `0.0f` | `0.40f` | 温和打开位置回中项，单独验证 `POSITION_SIGN` 极性 |
+
+其余保持：`KV=2.50 / KA=0 / KI=0`，`POSITION_SIGN=+1 / VELOCITY_SIGN=+1`，offset=-2.5。
+
+### 验证判据
+
+- 只测 `stand`，小幅推开约 `0.2~0.3m` 后放手观察。
+- **极性正确**：`position_m` 在数秒~十几秒内缓慢回向 0，不再长期顶在 `±0.30m` 限幅上；`position_error_m` 为正时 `speed_theta_ref_deg` 应含正向（朝误差方向倾）分量。
+- **极性错误**：车越离中心越加速跑远、`position_m` 快速打到限幅并伴随速度增大 → 只翻 `BALANCE_PID_POSITION_SIGN`，不动 `VELOCITY_SIGN`。
+- 若回中方向正确但来回振荡不收敛，说明 `KP=0.40` 相对 `KV=2.5` 偏大，先降 KP 到 `0.25~0.30`，不要动 KV。
+- 位置环极性确认后，再考虑放大 `BALANCE_PID_POSITION_LIMIT_M`（当前 0.30m 对"直走"太小）并测 `forward` 直走→`stand` 停车。
+
+## 2026-07-06 位置环 KP=0.40 验证：POSITION_SIGN 正确，限幅成为新瓶颈
+
+### 数据判断（16 路外环诊断，5098 行，约 102s；连续闭环 93.2s）
+
+- **`POSITION_SIGN=+1` 正确，定案**：
+  - 11 次 `|pos|>0.15m` 偏移事件中，10 次都回到 `<0.075m`，典型回中时间 `2~6s`（一次慢至 22.4s，一次被结尾故障打断）。
+  - `position_m` 过零仅 6 次/93s，回中是单调爬回，没有位置环振荡，`KP=0.40` 相对 `KV=2.5` 不偏大。
+  - 通道自洽验证：`speed_theta_ref = 0.40*position_error + 2.50*velocity_error` 拟合符合率 99.8%，链路按设计工作。
+- **新瓶颈是 `POSITION_LIMIT_M=0.30`**：
+  - `position_m` 顶限幅时间从上组 22% 升到 **42.4%**（推一下就到 0.30m 饱和）。
+  - 位置项最大权限只有 `0.40*0.30=0.12deg`，几乎可以忽略；目前回中主要还是靠速度阻尼+这一点点位置项慢慢蹭回来。
+  - 每次积分器顶限幅，"原点"就丢一截：不带限幅还原的真实位移净漂 `-1.13m`（范围 -1.99~0.17m）。车回的是"限幅后的假原点"，物理位置仍在漂。
+- 直立质量保持：`theta` 均值 -0.13deg，平均 `|theta|=1.18deg`，与上组相当，位置环打开没有付出直立代价。
+- 结尾 `fault=3`（93.2s）仍是强推超权限的老模式：`bref` 顶满 -320、电流 ~0.28A、theta 0.1s 内冲过 30deg，与位置环无关。
+
+### 参数修改
+
+| 参数 | 旧值 | 新值 | 原因 |
+|---|---:|---:|---|
+| `BALANCE_PID_POSITION_LIMIT_M` | `0.30f` | `1.00f` | 位置积分器 42% 时间饱和、原点持续丢失；放大后位置项最大权限从 0.12deg 提到 0.40deg |
+| `BALANCE_POSITION_KP_DEG_PER_M` | `0.40f` | `0.80f` | 极性和无振荡已确认，提高回中速度；1m 偏移对应 0.8deg 目标角，仍温和 |
+
+### 下一步测试
+
+- 只测 `stand`：小推后车应更快回中（目标 2~3s 内），且 `position_m` 很少再顶 1.0m 限幅。
+- 若出现来回过冲/低频摆动（位置过零明显变多），把 KP 退回 `0.5~0.6`。
+- 位置回中满意后，测 `forward` 直走 → `stand` 停车：停车判据是 `position_m` 收敛到停车点附近且 `velocity_mps` 归零。
+
+## 2026-07-06 KP=0.40 第二组数据：极性全部定案，进入纯调参阶段
+
+### 数据判断（16 路外环诊断，4114 行，约 82.3s，全程 fault=0；参数仍为 KP=0.40/LIMIT=0.30）
+
+- 本组为轻推测试（上一组是重推），表现明显更干净：
+  - `position_m` 顶 0.30m 限幅时间 **0%**（上一组 42.4%），说明轻扰动下 0.30m 限幅未被触及。
+  - 6 次 `|pos|>0.15m` 偏移全部回中，回中时间 **1.0~4.1s**。
+  - 真实位移（不带限幅积分）净漂只有 `+0.11m`，范围 `-0.13~0.22m`——位置已经锁得住。
+  - 平均 `|theta|=0.50deg`，最大仅 2.5deg；位置过零 5 次，无振荡。
+  - `speed_theta_ref = 0.40*perr + 2.50*verr` 符合率 100%。
+- 结论：**直立环、速度环、位置环三层极性全部正确并定案**（`POLARITY=+1 / VELOCITY_SIGN=+1 / POSITION_SIGN=+1`），遗留问题只剩参数量级：
+  1. 重推时 0.30m 限幅饱和导致原点丢失（上一组已暴露）→ 已放大 `POSITION_LIMIT_M` 到 1.00。
+  2. 回中速度偏慢（几秒级）→ 已提 KP 到 0.80，本组数据显示 0.40 无任何振荡迹象，0.80 有裕量。
+  3. 强推超 0.35A 动力权限触发 fault=3 属物理极限，暂不处理。
+- 当前待验证参数：`KP=0.80 / KV=2.50 / KA=0 / KI=0 / LIMIT=1.00`。
+
+### 下一步测试
+
+- 烧录 KP=0.80/LIMIT=1.00 后先重复 `stand` 轻推+重推：
+  - 轻推回中时间应从 ~2-4s 缩短；
+  - 重推后 `position_m` 不应长时间贴 1.0m，真实原点不再丢失。
+  - 若低频前后摆（位置过零明显增多），KP 退 0.5~0.6。
+- 然后进入 `forward` 直走 → `stand` 停车测试。

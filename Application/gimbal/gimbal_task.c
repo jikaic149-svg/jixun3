@@ -47,6 +47,8 @@ volatile float balance_pid_position_m = 0.0f;
 volatile float balance_pid_position_ref_m = 0.0f;
 volatile float balance_pid_velocity_mps = 0.0f;
 volatile float balance_pid_velocity_ref_mps = 0.0f;
+volatile float balance_pid_accel_mps2 = 0.0f;
+volatile float balance_pid_accel_theta_ref_deg = 0.0f;
 volatile float balance_pid_wheel_diff_mps = 0.0f;
 volatile float balance_pid_speed_theta_ref_deg = 0.0f;
 volatile float balance_pid_angle_speed_ref_rpm = 0.0f;
@@ -67,6 +69,10 @@ volatile float balance_pid_runtime_current_limit_a =
     BALANCE_PID_CURRENT_LIMIT_A;
 volatile float balance_pid_runtime_current_slew_a_per_sec =
     BALANCE_PID_CURRENT_SLEW_A_PER_SEC;
+volatile uint32_t chassis_serial_cmd_rx_count = 0U;
+volatile uint32_t chassis_serial_cmd_ok_count = 0U;
+volatile uint8_t chassis_serial_cmd_last_type = 0U;
+volatile float chassis_serial_cmd_last_value = 0.0f;
 volatile uint8_t balance_zero_bias_frozen = 0U;
 volatile uint8_t emergency_stop = 1U;
 
@@ -103,6 +109,9 @@ static float balance_position_ref_m = 0.0f;
 static float balance_velocity_lpf_mps = 0.0f;
 static uint8_t balance_velocity_lpf_ready = 0U;
 static float balance_velocity_ref_ramp_mps = 0.0f;
+static float balance_last_measured_velocity_mps = 0.0f;
+static float balance_accel_lpf_mps2 = 0.0f;
+static uint8_t balance_accel_lpf_ready = 0U;
 static float balance_speed_integral_m = 0.0f;
 
 static float Chassis_AbsF(float value)
@@ -504,6 +513,9 @@ static void Chassis_ResetBalancePid(void)
     balance_velocity_lpf_mps = 0.0f;
     balance_velocity_lpf_ready = 0U;
     balance_velocity_ref_ramp_mps = 0.0f;
+    balance_last_measured_velocity_mps = 0.0f;
+    balance_accel_lpf_mps2 = 0.0f;
+    balance_accel_lpf_ready = 0U;
     balance_speed_integral_m = 0.0f;
     balance_zero_bias_frozen = 0U;
     balance_pid_theta_deg = global_balance_angle;
@@ -515,6 +527,8 @@ static void Chassis_ResetBalancePid(void)
     balance_pid_position_ref_m = 0.0f;
     balance_pid_velocity_mps = 0.0f;
     balance_pid_velocity_ref_mps = 0.0f;
+    balance_pid_accel_mps2 = 0.0f;
+    balance_pid_accel_theta_ref_deg = 0.0f;
     balance_pid_wheel_diff_mps = 0.0f;
     balance_pid_speed_theta_ref_deg = 0.0f;
     balance_pid_angle_speed_ref_rpm = 0.0f;
@@ -581,6 +595,8 @@ static void Chassis_UpdateBalanceViewZeroOutput(void)
     balance_pid_position_ref_m = balance_position_ref_m;
     balance_pid_velocity_mps = BALANCE_PID_VELOCITY_SIGN * velocity_mps;
     balance_pid_velocity_ref_mps = 0.0f;
+    balance_pid_accel_mps2 = 0.0f;
+    balance_pid_accel_theta_ref_deg = 0.0f;
     balance_pid_wheel_diff_mps = wheel_diff_mps;
     balance_pid_speed_theta_ref_deg = 0.0f;
     balance_pid_angle_speed_ref_rpm = 0.0f;
@@ -790,6 +806,9 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
     float theta_error_deg;
     float target_velocity_mps;
     float speed_error_mps;
+    float accel_raw_mps2;
+    float accel_error_mps2;
+    float accel_theta_ref_deg;
     float position_error_m;
     float speed_theta_ref_deg;
     float balance_speed_ref_rpm;
@@ -860,6 +879,19 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
     measured_position_m = BALANCE_PID_POSITION_SIGN * balance_position_m;
     wheel_diff_mps = (right_rpm - left_rpm) * BALANCE_RPM_TO_MPS;
 
+    accel_raw_mps2 = (measured_velocity_mps -
+                      balance_last_measured_velocity_mps) /
+                     BALANCE_PID_DT_SEC;
+    if (balance_accel_lpf_ready == 0U) {
+        balance_accel_lpf_mps2 = 0.0f;
+        balance_accel_lpf_ready = 1U;
+    } else {
+        balance_accel_lpf_mps2 += velocity_alpha *
+                                  (accel_raw_mps2 -
+                                   balance_accel_lpf_mps2);
+    }
+    balance_last_measured_velocity_mps = measured_velocity_mps;
+
     target_velocity_mps = Chassis_ModeTargetVelocityMps(chassis_mode);
     balance_velocity_ref_ramp_mps =
         Chassis_StepTowards(balance_velocity_ref_ramp_mps,
@@ -876,6 +908,9 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
         speed_error_mps = 0.0f;
     }
     position_error_m = balance_position_ref_m - measured_position_m;
+    accel_error_mps2 = 0.0f - balance_accel_lpf_mps2;
+    accel_theta_ref_deg = BALANCE_POSITION_KA_DEG_PER_MPS2 *
+                          accel_error_mps2;
 
     balance_speed_integral_m += position_error_m * BALANCE_PID_DT_SEC;
     balance_speed_integral_m =
@@ -884,6 +919,7 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
     speed_theta_ref_deg =
         BALANCE_POSITION_KP_DEG_PER_M * position_error_m +
         BALANCE_POSITION_KV_DEG_PER_MPS * speed_error_mps +
+        accel_theta_ref_deg +
         BALANCE_POSITION_KI_DEG_PER_M_S * balance_speed_integral_m;
     speed_theta_ref_deg = Chassis_LimitAbs(speed_theta_ref_deg,
                                            BALANCE_PID_THETA_REF_LIMIT_DEG);
@@ -939,6 +975,8 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
     balance_pid_position_ref_m = balance_position_ref_m;
     balance_pid_velocity_mps = measured_velocity_mps;
     balance_pid_velocity_ref_mps = balance_velocity_ref_ramp_mps;
+    balance_pid_accel_mps2 = balance_accel_lpf_mps2;
+    balance_pid_accel_theta_ref_deg = accel_theta_ref_deg;
     balance_pid_wheel_diff_mps = wheel_diff_mps;
     balance_pid_speed_theta_ref_deg = speed_theta_ref_deg;
     balance_pid_angle_speed_ref_rpm =
