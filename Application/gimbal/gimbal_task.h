@@ -16,11 +16,29 @@ typedef enum {
     CHASSIS_MOTOR_WAIT_ENABLE,
     CHASSIS_MOTOR_READY,
     CHASSIS_MOTOR_SPEED_TEST,
-    CHASSIS_MOTOR_BALANCE_LQR
+    CHASSIS_MOTOR_BALANCE_PID
 } ChassisMotorState_e;
+
+typedef enum {
+    CHASSIS_MODE_STAND = 0,
+    CHASSIS_MODE_FORWARD,
+    CHASSIS_MODE_STOP,
+    CHASSIS_MODE_TURN_LEFT,
+    CHASSIS_MODE_TURN_RIGHT
+} ChassisMode_e;
+
+typedef enum {
+    BALANCE_PID_RUNTIME_KP = 0,
+    BALANCE_PID_RUNTIME_KI,
+    BALANCE_PID_RUNTIME_KD,
+    BALANCE_PID_RUNTIME_SPEED_LIMIT_RPM,
+    BALANCE_PID_RUNTIME_CURRENT_LIMIT_A,
+    BALANCE_PID_RUNTIME_CURRENT_SLEW_A_PER_SEC
+} BalancePidRuntimeParam_e;
 
 extern volatile GimbalState_e gimbal_state;
 extern volatile ChassisMotorState_e chassis_motor_state;
+extern volatile ChassisMode_e chassis_mode;
 extern volatile uint8_t chassis_motor_feedback_ok;
 extern volatile uint8_t chassis_motor_enabled_ok;
 extern volatile uint8_t chassis_speed_test_armed;
@@ -33,8 +51,6 @@ extern volatile float wheel_speed_output_left_a;
 extern volatile float wheel_speed_ref_right_rpm;
 extern volatile float wheel_speed_actual_right_rpm;
 extern volatile float wheel_speed_output_right_a;
-extern volatile float wheel_speed_encoder_left_rpm;
-extern volatile float wheel_speed_encoder_right_rpm;
 extern volatile float wheel_speed_feedback_left_a;
 extern volatile float wheel_speed_feedback_right_a;
 extern volatile float wheel_speed_eso_z1_rpm;
@@ -42,26 +58,38 @@ extern volatile float wheel_speed_eso_z2_rpm_s;
 extern volatile float wheel_speed_pi_integral;
 extern volatile float wheel_speed_pi_integral_right;
 extern volatile float wheel_speed_target_rpm;
-extern volatile float balance_lqr_theta_deg;
-extern volatile float balance_lqr_theta_ref_deg;
-extern volatile float balance_lqr_zero_bias_deg;
-extern volatile float balance_lqr_theta_rate_dps;
-extern volatile float balance_lqr_position_m;
-extern volatile float balance_lqr_velocity_mps;
-extern volatile float balance_lqr_force_n;
-extern volatile float balance_lqr_force_x_n;
-extern volatile float balance_lqr_force_v_n;
-extern volatile float balance_lqr_force_theta_n;
-extern volatile float balance_lqr_force_rate_n;
-extern volatile float balance_lqr_current_target_a;
-extern volatile float balance_lqr_current_cmd_a;
-extern volatile float balance_lqr_current_feedback_a;
-extern volatile float balance_lqr_output_left_a;
-extern volatile float balance_lqr_output_right_a;
+extern volatile float balance_pid_theta_deg;
+extern volatile float balance_pid_theta_ref_deg;
+extern volatile float balance_pid_manual_bias_deg;
+extern volatile float balance_pid_theta_rate_dps;
+extern volatile float balance_pid_accel_angle_deg;
+extern volatile float balance_pid_position_m;
+extern volatile float balance_pid_position_ref_m;
+extern volatile float balance_pid_velocity_mps;
+extern volatile float balance_pid_velocity_ref_mps;
+extern volatile float balance_pid_wheel_diff_mps;
+extern volatile float balance_pid_speed_theta_ref_deg;
+extern volatile float balance_pid_angle_speed_ref_rpm;
+extern volatile float balance_pid_rate_speed_ref_rpm;
+extern volatile float balance_pid_balance_speed_ref_rpm;
+extern volatile float balance_pid_current_target_a;
+extern volatile float balance_pid_current_cmd_a;
+extern volatile float balance_pid_current_feedback_a;
+extern volatile float balance_pid_turn_speed_ref_rpm;
+extern volatile float balance_pid_output_left_a;
+extern volatile float balance_pid_output_right_a;
+extern volatile float balance_pid_runtime_kp;
+extern volatile float balance_pid_runtime_ki;
+extern volatile float balance_pid_runtime_kd;
+extern volatile float balance_pid_runtime_speed_limit_rpm;
+extern volatile float balance_pid_runtime_current_limit_a;
+extern volatile float balance_pid_runtime_current_slew_a_per_sec;
 extern volatile uint8_t balance_zero_bias_frozen;
 
 extern void Gimbal_Task(void *argument);
 void WheelSpeed_SetTargetRpm(float rpm);
 void Balance_SetManualBiasDeg(float bias_deg);
+void Balance_SetPidRuntimeParam(BalancePidRuntimeParam_e param, float value);
+void Chassis_SetControlMode(ChassisMode_e mode);
 
 #endif /* GIMBAL_TASK_H */

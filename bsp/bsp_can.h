@@ -13,18 +13,12 @@
 typedef struct {
     uint8_t enabled;
     float current;
-    float speed;
     float speed_can_rpm;
     float angle;
-    float last_angle;
-    float total_angle;
-    float speed_window_angle;
     uint16_t encoder_raw;
     uint8_t init_flag;
-    uint8_t speed_ready;
     uint32_t rx_count;
     uint32_t last_rx_tick;
-    uint32_t speed_window_tick;
 } Motor_Measure_t;
 
 extern volatile Motor_Measure_t left_wheel_motor;

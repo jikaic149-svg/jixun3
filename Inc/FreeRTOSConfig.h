@@ -14,7 +14,13 @@
 #define configUSE_IDLE_HOOK                     0
 #define configUSE_TICK_HOOK                     0
 #define configCPU_CLOCK_HZ                      168000000UL
-#define configSYSTICK_CLOCK_HZ                  168000000UL
+/* 不要定义 configSYSTICK_CLOCK_HZ!
+ * port.c 只要看到它被显式定义(哪怕值等于CPU频率),就会清掉 SysTick 的
+ * CLKSOURCE 位,让 SysTick 走外部时钟 HCLK/8=21MHz,而重装载值仍按168MHz算,
+ * 结果每个"1ms" tick 实际 8ms —— 全系统 FreeRTOS 计时慢 8 倍
+ * (轮速PID"1kHz"实际125Hz, VOFA"20ms"实际160ms)。
+ * 不定义时 port.c 默认 configSYSTICK_CLOCK_HZ=configCPU_CLOCK_HZ 且置位
+ * CLKSOURCE, SysTick 才真正跑在 168MHz。 */
 #define configTICK_RATE_HZ                      ((TickType_t)1000)
 #define configMAX_PRIORITIES                    7
 #define configMINIMAL_STACK_SIZE                ((uint16_t)128)

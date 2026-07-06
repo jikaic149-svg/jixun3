@@ -113,6 +113,7 @@ float KalmanAngle_Update(KalmanAngle_t *kf,
                          float accel_angle_deg,
                          float gyro_rate_dps,
                          float dt_sec);
+float KalmanAngle_Correct(KalmanAngle_t *kf, float accel_angle_deg);
 float KalmanAngle_GetRate(const KalmanAngle_t *kf);
 void KalmanScalar_Init(KalmanScalar_t *kf, float q, float r);
 void KalmanScalar_SetState(KalmanScalar_t *kf, float value);

@@ -252,14 +252,18 @@ float KalmanAngle_Update(KalmanAngle_t *kf,
                          float gyro_rate_dps,
                          float dt_sec)
 {
+    (void)KalmanAngle_Predict(kf, gyro_rate_dps, dt_sec);
+    return KalmanAngle_Correct(kf, accel_angle_deg);
+}
+
+float KalmanAngle_Correct(KalmanAngle_t *kf, float accel_angle_deg)
+{
     float s;
     float k0;
     float k1;
     float y;
     float p00_temp;
     float p01_temp;
-
-    (void)KalmanAngle_Predict(kf, gyro_rate_dps, dt_sec);
 
     s = kf->p00 + kf->r_measure;
     k0 = kf->p00 / s;

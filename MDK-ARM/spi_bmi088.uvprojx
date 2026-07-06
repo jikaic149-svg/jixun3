@@ -644,6 +644,11 @@
               <FileType>1</FileType>
               <FilePath>../Application/gimbal/gimbal_task.c</FilePath>
             </File>
+            <File>
+              <FileName>chassis_serial_cmd.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Application/gimbal/chassis_serial_cmd.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

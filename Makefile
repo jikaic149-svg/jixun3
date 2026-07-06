@@ -70,6 +70,7 @@ Application/algorithm/lqr_controller.c \
 Application/algorithm/balance_outer_loop.c \
 Application/algorithm/balance_zero_bias_search.c \
 Application/ins/ins_task.c \
+Application/gimbal/chassis_serial_cmd.c \
 Application/gimbal/gimbal_task.c \
 Middlewares/Third_Party/FreeRTOS/Source/tasks.c \
 Middlewares/Third_Party/FreeRTOS/Source/queue.c \

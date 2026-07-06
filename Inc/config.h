@@ -90,31 +90,32 @@
 #define WHEEL_SAFE_TASK_PERIOD_MS     1U
 
 /* 离地左轮 ESO+PI 轮速测试：上电默认急停，按键授权后才输出非零电流。 */
-#define WHEEL_SPEED_TEST_ENABLE             1U
-#define WHEEL_SPEED_TEST_REF_RPM            100.0f
+#define WHEEL_SPEED_TEST_ENABLE             0U
+#define WHEEL_SPEED_TEST_REF_RPM            0.0f
 #define WHEEL_SPEED_TEST_REF_MIN_ABS_RPM    20.0f
-#define WHEEL_SPEED_TEST_REF_MAX_ABS_RPM    500.0f
-#define WHEEL_SPEED_TEST_CURRENT_LIMIT_A    0.60f
+#define WHEEL_SPEED_TEST_REF_MAX_ABS_RPM    200.0f
+#define WHEEL_SPEED_TEST_CURRENT_LIMIT_A    0.35f
 #define WHEEL_SPEED_TEST_BRAKE_CURRENT_LIMIT_A 0.010f
 #define WHEEL_SPEED_TEST_DT_SEC             0.001f
-#define WHEEL_ENCODER_SPEED_WINDOW_MS       20U
-#define WHEEL_ENCODER_SPEED_LPF_ALPHA       0.40f
 #define WHEEL_SPEED_TEST_UNIDIRECTIONAL     0U
+#define WHEEL_SPEED_TEST_AUTO_SEQUENCE_ENABLE 0U
+#define WHEEL_SPEED_TEST_AUTO_STEP_MS       1500U
 
 /* jixun2风格轮速PID：u = (Kp*err + Ki*integral - Kd*speed) * polarity。 */
-#define WHEEL_SPEED_PID_KP_A_PER_RPM        0.00150f
+#define WHEEL_SPEED_PID_KP_A_PER_RPM        0.00130f
 #define WHEEL_SPEED_PID_KI_A_PER_RPM_S      0.001000f
 #define WHEEL_SPEED_PID_KD_A_PER_RPM        0.000f
+#define WHEEL_SPEED_PID_ERROR_DEADBAND_RPM  0.0f
 #define WHEEL_SPEED_PID_POLARITY            1.0f
 #define LEFT_WHEEL_SPEED_PID_POLARITY       WHEEL_SPEED_PID_POLARITY
 #define RIGHT_WHEEL_SPEED_PID_POLARITY      WHEEL_SPEED_PID_POLARITY
 #define WHEEL_SPEED_PID_INTEGRAL_LIMIT      120.0f
-#define WHEEL_SPEED_FF_STATIC_A             0.010f
-#define WHEEL_SPEED_FF_KV_A_PER_RPM         0.00020f
-#define LEFT_WHEEL_SPEED_FEEDBACK_LPF_ALPHA 0.25f
-#define RIGHT_WHEEL_SPEED_FEEDBACK_LPF_ALPHA 0.10f
+#define WHEEL_SPEED_FF_STATIC_A             0.018f
+#define WHEEL_SPEED_FF_KV_A_PER_RPM         0.00015f
+#define LEFT_WHEEL_SPEED_FEEDBACK_LPF_ALPHA 0.20f
+#define RIGHT_WHEEL_SPEED_FEEDBACK_LPF_ALPHA 0.20f
 #define WHEEL_SPEED_TARGET_RAMP_RPM_PER_SEC 3000.0f
-#define WHEEL_SPEED_CURRENT_SLEW_A_PER_SEC  8.0f
+#define WHEEL_SPEED_CURRENT_SLEW_A_PER_SEC  20.0f
 
 /* 三个主调参数：Kp/Ki 产生期望轮速加速度，wo 是 ESO 带宽。 */
 #define WHEEL_SPEED_ESO_PI_KP               0.5f
@@ -128,190 +129,48 @@
 
 #define KEY_DEBOUNCE_MS                     30U
 
-/* First balance stage: fixed-gain LQR only, no speed/line/yaw outer loop yet. */
-#define BALANCE_LQR_ENABLE                  1U
-#define BALANCE_LQR_OUTPUT_MODE_CURRENT     0U
-#define BALANCE_LQR_OUTPUT_MODE_SPEED       1U
-#define BALANCE_LQR_OUTPUT_MODE             BALANCE_LQR_OUTPUT_MODE_CURRENT
+/* Balance PID standing loop. */
+#define BALANCE_PID_ENABLE                  1U
 #define CHASSIS_FAULT_NONE                  0U
 #define CHASSIS_FAULT_FEEDBACK              1U
 #define CHASSIS_FAULT_ENABLE                2U
-#define CHASSIS_FAULT_LQR_ANGLE             3U
-#define CHASSIS_FAULT_LQR_RATE              4U
-#define BALANCE_LQR_CURRENT_LIMIT_A         0.40f
-#define BALANCE_LQR_CURRENT_SLEW_A_PER_SEC  25.0f
-#define BALANCE_LQR_CURRENT_ZERO_SLEW_A_PER_SEC 80.0f
-#define BALANCE_LQR_MIN_EFFECTIVE_CURRENT_A 0.035f
-#define BALANCE_LQR_MIN_EFFECTIVE_THETA_DEG 1.0f
-#define BALANCE_LQR_MIN_EFFECTIVE_RATE_DPS  15.0f
-#define BALANCE_LQR_DISTURBANCE_SCHEDULE_ENABLE 0U
-#define BALANCE_LQR_DIST_THETA_DEG          2.5f
-#define BALANCE_LQR_DIST_RATE_DPS           120.0f
-#define BALANCE_LQR_DIST_VELOCITY_MPS       0.25f
-#define BALANCE_LQR_DIST_THETA_BOOST        2.0f
-#define BALANCE_LQR_DIST_RATE_BOOST         4.0f
-#define BALANCE_LQR_DIST_V_BOOST            2.0f
-#define BALANCE_LQR_DIST_CURRENT_LIMIT_A    1.00f
-#define BALANCE_LQR_DIST_CURRENT_SLEW_A_PER_SEC 120.0f
-#define BALANCE_LQR_SAFE_ANGLE_DEG          45.0f
-#define BALANCE_LQR_SAFE_RATE_DPS           900.0f
-#define BALANCE_LQR_POSITION_LIMIT_M        0.30f
-#define BALANCE_LQR_VELOCITY_LPF_ALPHA      0.15f
-#define BALANCE_LQR_USE_WHEEL_STATE         0U
-#define BALANCE_LQR_VELOCITY_LIMIT_MPS      1.5f
-#define BALANCE_LQR_SPEED_SOURCE_CAN        0U
-#define BALANCE_LQR_SPEED_SOURCE_ENCODER    1U
-#define BALANCE_LQR_SPEED_SOURCE            BALANCE_LQR_SPEED_SOURCE_CAN
-#define BALANCE_LQR_SPEED_REF_LIMIT_RPM     300.0f
-#define BALANCE_LQR_FORCE_TO_SPEED_RPM_PER_N 45.0f
-/* LKG hold baseline plus the added top wheel load. */
-#define BALANCE_LQR_K_X_SCALE               0.34f
-#define BALANCE_LQR_K_V_SCALE               0.36f
-#define BALANCE_LQR_K_THETA_SCALE           0.10f
-#define BALANCE_LQR_K_THETA_DOT_SCALE       0.050f
-#define BALANCE_LQR_X_RISK_GATE_ENABLE      0U
-#define BALANCE_LQR_X_GATE_THETA_DEG        2.0f
-#define BALANCE_LQR_X_GATE_RATE_DPS         80.0f
-#define BALANCE_LQR_X_GATE_MIN_SCALE        0.15f
-#define BALANCE_LQR_THETA_REF_DEG           0.0f
+#define CHASSIS_FAULT_PID_ANGLE             3U
+#define CHASSIS_FAULT_PID_RATE              4U
+#define BALANCE_PID_DT_SEC                  (0.001f * (float)WHEEL_SAFE_TASK_PERIOD_MS)
+#define BALANCE_PID_CURRENT_LIMIT_A         0.35f
+#define BALANCE_PID_CURRENT_SLEW_A_PER_SEC  20.0f
+#define BALANCE_PID_SAFE_ANGLE_DEG          30.0f
+#define BALANCE_PID_SAFE_RATE_DPS           600.0f
+#define BALANCE_PID_POSITION_LIMIT_M        0.30f
+#define BALANCE_PID_VELOCITY_LPF_ALPHA      0.15f
+#define BALANCE_PID_VELOCITY_LIMIT_MPS      1.5f
+#define BALANCE_PID_THETA_REF_DEG           0.0f
+#define BALANCE_PID_THETA_REF_LIMIT_DEG     2.0f
+#define BALANCE_PID_ANGLE_INTEGRAL_LIMIT_DEG_S 4.0f
+#define BALANCE_PID_BALANCE_SPEED_LIMIT_RPM 250.0f
+#define BALANCE_PID_ANGLE_KP_RPM_PER_DEG    14.00f
+#define BALANCE_PID_ANGLE_KI_RPM_PER_DEG_S  0.0f
+#define BALANCE_PID_RATE_KD_RPM_PER_DPS     0.300f
+#define BALANCE_POSITION_KP_DEG_PER_M       2.50f
+#define BALANCE_POSITION_KV_DEG_PER_MPS     1.50f
+#define BALANCE_POSITION_KI_DEG_PER_M_S     0.0f
+#define BALANCE_POSITION_INTEGRAL_LIMIT_M_S 0.20f
+#define BALANCE_PID_KALMAN_ANGLE_WEIGHT     1.0f
+#define BALANCE_PID_ACCEL_ANGLE_WEIGHT      0.0f
+#define BALANCE_PID_WHEEL_SPEED_DEADBAND_MPS 0.010f
+#define BALANCE_MODE_FORWARD_VELOCITY_MPS   0.18f
+#define BALANCE_MODE_FORWARD_VELOCITY_LIMIT_MPS 0.35f
+#define BALANCE_MODE_VELOCITY_RAMP_MPS_PER_SEC 0.30f
+#define BALANCE_MODE_TURN_SPEED_RPM         45.0f
+#define BALANCE_PID_POLARITY                1.0f
+#define BALANCE_PID_POSITION_SIGN           1.0f
+#define BALANCE_PID_VELOCITY_SIGN           1.0f
+#define BALANCE_PID_LEFT_YAW_SIGN           (-1.0f)
+#define BALANCE_PID_RIGHT_YAW_SIGN          1.0f
 #define BALANCE_MANUAL_BIAS_LIMIT_DEG       2.0f
-#define BALANCE_OUTER_ENABLE                0U
-#define BALANCE_OUTER_V_ENABLE              0U
-#define BALANCE_OUTER_X_ENABLE              0U
-#define BALANCE_OUTER_I_ENABLE              0U
-#define BALANCE_OUTER_THETA_REF_LIMIT_DEG   0.12f
-#define BALANCE_OUTER_KV_DEG_PER_MPS        (-2.00f)
-#define BALANCE_OUTER_KX_DEG_PER_M          0.0f
-#define BALANCE_OUTER_KI_DEG_PER_M_S        (-0.35f)
-#define BALANCE_OUTER_INTEGRAL_LIMIT_M_S    0.08f
-#define BALANCE_OUTER_ACTIVE_THETA_DEG      6.0f
-#define BALANCE_OUTER_ACTIVE_CURRENT_A      0.25f
-#define BALANCE_ZERO_BIAS_ENABLE            0U
-#define BALANCE_ZERO_BIAS_LIMIT_DEG         1.0f
-#define BALANCE_ZERO_BIAS_ACTIVE_THETA_DEG  2.0f
-#define BALANCE_ZERO_BIAS_ACTIVE_RATE_DPS   120.0f
-#define BALANCE_ZERO_BIAS_ACTIVE_CURRENT_A  0.45f
-#define BALANCE_ZERO_BIAS_ACTIVE_POSITION_M 0.18f
-#define BALANCE_ZERO_BIAS_ACTIVE_VELOCITY_MPS 0.18f
-#define BALANCE_ZERO_BIAS_V_DEADBAND_MPS    0.015f
-#define BALANCE_ZERO_BIAS_X_DEADBAND_M      0.015f
-#define BALANCE_ZERO_BIAS_DITHER_DEG        0.015f
-#define BALANCE_ZERO_BIAS_UPDATE_STEP_DEG   0.003f
-#define BALANCE_ZERO_BIAS_SETTLE_MS         1500U
-#define BALANCE_ZERO_BIAS_EVAL_MS           2500U
-#define BALANCE_ZERO_BIAS_FREEZE_ENABLE     1U
-#define BALANCE_ZERO_BIAS_FREEZE_ROUNDS     3U
-#define BALANCE_ZERO_BIAS_IMPROVE_EPS       0.005f
-#define BALANCE_ZERO_BIAS_V_SCALE_MPS       0.12f
-#define BALANCE_ZERO_BIAS_X_SCALE_M         0.08f
-#define BALANCE_ZERO_BIAS_RATE_SCALE_DPS    80.0f
-#define BALANCE_ZERO_BIAS_CURRENT_SCALE_A   0.30f
-#define BALANCE_ZERO_BIAS_W_V               1.00f
-#define BALANCE_ZERO_BIAS_W_X               0.45f
-#define BALANCE_ZERO_BIAS_W_RATE            0.20f
-#define BALANCE_ZERO_BIAS_W_CURRENT         0.10f
-#define BALANCE_LQR_POSITION_SIGN           1.0f
-#define BALANCE_LQR_VELOCITY_SIGN           1.0f
-#define BALANCE_LQR_DT_SEC                  (0.001f * (float)WHEEL_SAFE_TASK_PERIOD_MS)
-#define BALANCE_DEG_TO_RAD                  0.017453292519943295f
+#define BALANCE_WHEEL_RADIUS_M              0.031f
 #define BALANCE_RPM_TO_MPS                  \
     (BALANCE_WHEEL_RADIUS_M * 6.283185307179586f / 60.0f)
-
-/*
- * ========================================================
- * 平衡车 LQR 物理模型与初始增益
- * ========================================================
- *
- * 状态定义：
- * X = [x, v, theta, theta_dot]^T
- *
- * x         车体前后位移，m
- * v         车体前后速度，m/s
- * theta     车体俯仰角，直立为0，rad
- * theta_dot 俯仰角速度，rad/s
- *
- * 控制输入：
- * F = 左右轮共同产生的等效水平驱动力，N
- */
-
-#define BALANCE_LQR_STATE_COUNT              4U
-#define BALANCE_LQR_STATE_X                  0U
-#define BALANCE_LQR_STATE_V                  1U
-#define BALANCE_LQR_STATE_THETA              2U
-#define BALANCE_LQR_STATE_THETA_DOT          3U
-
-#define BALANCE_TOTAL_MASS_KG                0.7595f
-#define BALANCE_WHEEL_MOTOR_SINGLE_MASS_KG   0.1535f
-#define BALANCE_WHEEL_MOTOR_PAIR_MASS_KG     0.307f
-#define BALANCE_BASE_MASS_KG                 0.307f
-#define BALANCE_BODY_MASS_KG                 0.4525f
-
-#define BALANCE_BATTERY_MASS_KG              0.1789f
-#define BALANCE_C_BOARD_MASS_KG              0.038f
-#define BALANCE_PLA_FRAME_MASS_KG            0.083f
-#define BALANCE_TOP_WHEEL_MASS_KG            0.1535f
-#define BALANCE_TOP_WHEEL_COM_HEIGHT_M       0.070f
-
-#define BALANCE_WHEEL_RADIUS_M               0.031f
-#define BALANCE_HALF_TRACK_M                 0.083f
-#define BALANCE_TRACK_M                      0.166f
-#define BALANCE_BODY_COM_LENGTH_M            0.04702f
-#define BALANCE_BODY_PITCH_INERTIA_KGM2      0.000327f
-
-/* 电池95mm长边沿左右方向，即沿pitch轴；重心约在零件1中心下方15mm。 */
-#define BALANCE_BATTERY_LENGTH_M             0.095f
-#define BALANCE_BATTERY_WIDTH_M              0.034f
-#define BALANCE_BATTERY_HEIGHT_M             0.027f
-#define BALANCE_BATTERY_COM_Z_OFFSET_M       (-0.015f)
-
-/* LQR权重：Q = diag([0.5, 2.0, 500.0, 30.0]), R = 0.20 */
-#define BALANCE_LQR_Q_X                      0.5f
-#define BALANCE_LQR_Q_V                      2.0f
-#define BALANCE_LQR_Q_THETA                  500.0f
-#define BALANCE_LQR_Q_THETA_DOT              30.0f
-#define BALANCE_LQR_R_FORCE                  0.20f
-
-/*
- * 离散LQR增益：
- * K = [-1.1349, -3.9377, -50.6923, -9.0807]
- * F = -K * X
- */
-#define BALANCE_LQR_K_X                      (-1.1349f)
-#define BALANCE_LQR_K_V                      (-3.9377f)
-#define BALANCE_LQR_K_THETA                  (-50.6923f)
-#define BALANCE_LQR_K_THETA_DOT              (-9.0807f)
-
-/* 展开后的等效正系数，仅用于人工核对方向。 */
-#define BALANCE_LQR_F_X_COEF                 1.1349f
-#define BALANCE_LQR_F_V_COEF                 3.9377f
-#define BALANCE_LQR_F_THETA_COEF             50.6923f
-#define BALANCE_LQR_F_THETA_DOT_COEF         9.0807f
-
-/*
- * 方向验证：
- * 车前倾时轮子必须向前救车。
- * 如果方向反，只改整体符号，不要先改K。
- */
-#define BALANCE_LQR_FORCE_SIGN               1.0f
-
-/*
- * 电流换算：
- * tau_total = F * r
- * tau_each  = tau_total / 2
- * I_each    = F * r / (2 * Kt)
- *
- * 暂用 Kt = 0.05 N*m/A：
- * I_each = 0.31 * F
- */
-#define BALANCE_MOTOR_KT_NM_PER_A            (QD4310_RATED_TORQUE_NM / QD4310_RATED_CURRENT_A)
-#define BALANCE_FORCE_TO_EACH_CURRENT_A_PER_N \
-    (BALANCE_WHEEL_RADIUS_M / (2.0f * BALANCE_MOTOR_KT_NM_PER_A))
-#define BALANCE_LQR_FORCE_LIMIT_N \
-    (BALANCE_LQR_CURRENT_LIMIT_A / BALANCE_FORCE_TO_EACH_CURRENT_A_PER_N)
-
-/* 转向差动：I_L = I_each - I_yaw, I_R = I_each + I_yaw */
-#define BALANCE_LQR_LEFT_YAW_SIGN            (-1.0f)
-#define BALANCE_LQR_RIGHT_YAW_SIGN           1.0f
 
 /*
  * ========================================================
@@ -338,12 +197,20 @@
 #define BALANCE_ACCEL_ANGLE_MODE     BALANCE_ACCEL_ANGLE_ROLL
 #define BALANCE_ACCEL_ANGLE_SIGN     (-1.0f)
 #define BALANCE_GYRO_AXIS            BALANCE_AXIS_X
-#define BALANCE_GYRO_SIGN            1.0f
+/* 实测（电机断开、手动晃车段）d(accel_angle)/dt = -1.08 × gyro_rate：
+ * 加速度角与陀螺仪对同一倾倒方向的符号相反。保持加速度角符号不动
+ * （救车方向极性是按它验证的），翻转陀螺仪符号使两源一致。 */
+#define BALANCE_GYRO_SIGN            (-1.0f)
 
 /* yaw 只用于底盘航向估计，现场如果方向反了只改符号。 */
 #define CHASSIS_YAW_GYRO_AXIS        BALANCE_AXIS_Z
 #define CHASSIS_YAW_GYRO_SIGN        1.0f
-#define CHASSIS_YAW_RATE_BIAS_DPS    0.085f
+#define CHASSIS_YAW_RATE_BIAS_DPS    0.136f
+#define CHASSIS_YAW_RATE_DEADBAND_DPS 0.05f
+#define IMU_YAW_BIAS_KEY_CAL_ENABLE  0U
+#define IMU_YAW_BIAS_KEY_CAL_SAMPLES 500U
+#define IMU_GYRO_BIAS_CAL_ENABLE     0U
+#define IMU_GYRO_BIAS_CAL_SAMPLES    500U
 /* Yaw rate scalar Kalman: bigger Q or smaller R = faster response, less smoothing. */
 #define CHASSIS_YAW_RATE_KALMAN_Q    0.10f
 #define CHASSIS_YAW_RATE_KALMAN_R    0.50f
@@ -353,14 +220,23 @@
 /* Balance car must not treat power-on pose as zero. Use fixed mechanical offset only. */
 #define BALANCE_BOOT_ZERO_ENABLE     0
 
-#define BALANCE_KALMAN_Q_ANGLE       0.012f
-#define BALANCE_KALMAN_Q_BIAS        0.003f
-#define BALANCE_KALMAN_R_MEASURE     0.110f
+/* 主次关系：陀螺仪积分为主体，加速度角只做慢速零漂修正。
+ * 旧值 Q=0.012/Qb=0.003/R=0.5 的加速度修正时间常数约 0.18s，
+ * 直立摆动在 ~1Hz，轮子加速度污染（实测 ~14deg，与真实角同量级）
+ * 约 2/3 穿透进控制角，且 Qb 偏大使污染同时写坏陀螺零漂估计。
+ * 新值时间常数约 1.2s，1Hz 污染穿透降到 ~13%；陀螺零漂本身变化
+ * 很慢，慢修正不损失静态精度。若动态下 theta 仍被拽，继续加大 R。 */
+#define BALANCE_KALMAN_Q_ANGLE       0.001f
+#define BALANCE_KALMAN_Q_BIAS        0.0001f
+#define BALANCE_KALMAN_R_MEASURE     5.000f
 
-#define BALANCE_ACCEL_GATE_ENABLE    0
+/* 加速度模长门控：|a| 偏离 1g 时跳过加速度修正，只做陀螺积分，
+ * 专门拦截轮子加减速这类瞬态污染。 */
+#define BALANCE_ACCEL_GATE_ENABLE    1
 #define BALANCE_ACCEL_GRAVITY_MS2    9.80665f
 #define BALANCE_ACCEL_NORM_MIN_G     0.75f
 #define BALANCE_ACCEL_NORM_MAX_G     1.25f
+#define BALANCE_ACCEL_ANGLE_GATE_DEG 10.0f
 #define BALANCE_ACCEL_ANGLE_LPF_ALPHA 0.05f
 
 /* DRDY/SPI DMA未触发时允许轮询降级，先保证VOFA+有数据用于排查链路。 */
@@ -376,10 +252,10 @@
 
 /* ENCODER模式通道顺序：
  * I0 左轮目标rpm
- * I1 左轮CAN反馈速度rpm
+ * I1 左轮速度环实际速度rpm
  * I2 左轮命令电流A
  * I3 右轮目标rpm
- * I4 右轮CAN反馈速度rpm
+ * I4 右轮速度环实际速度rpm
  * I5 右轮命令电流A
  *
  * CAN_DIAG模式通道顺序：
@@ -393,11 +269,18 @@
 #define VOFA_OUTPUT_ENABLE           1
 #define VOFA_OUTPUT_DIVIDER          5U
 #define VOFA_OUTPUT_PERIOD_MS        20U
+#define VOFA_DEBUG_STAGE_MOTOR_FEEDBACK 0U
+#define VOFA_DEBUG_STAGE_IMU_ATTITUDE   1U
+#define VOFA_DEBUG_STAGE_SPEED_LOOP     2U
+#define VOFA_DEBUG_STAGE_BALANCE_CASCADE 3U
+#define VOFA_DEBUG_STAGE                VOFA_DEBUG_STAGE_BALANCE_CASCADE
 #if VOFA_OUTPUT_MODE == VOFA_OUTPUT_MODE_ENCODER
-#if BALANCE_LQR_ENABLE
-#define VOFA_OUTPUT_CHANNEL_COUNT    12U
-#else
+#if VOFA_DEBUG_STAGE == VOFA_DEBUG_STAGE_SPEED_LOOP
 #define VOFA_OUTPUT_CHANNEL_COUNT    6U
+#elif VOFA_DEBUG_STAGE == VOFA_DEBUG_STAGE_IMU_ATTITUDE
+#define VOFA_OUTPUT_CHANNEL_COUNT    8U
+#else
+#define VOFA_OUTPUT_CHANNEL_COUNT    12U
 #endif
 #elif VOFA_OUTPUT_MODE == VOFA_OUTPUT_MODE_CAN_DIAG
 #define VOFA_OUTPUT_CHANNEL_COUNT    6U

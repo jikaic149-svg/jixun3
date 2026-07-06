@@ -35,8 +35,15 @@ extern void Gimbal_Task(void *argument);
 // 平衡车底盘姿态输出
 extern float global_balance_angle;
 extern float global_balance_rate;
+extern float global_balance_accel_angle;
+extern float global_balance_accel_forward_ms2;
 extern float global_chassis_yaw;
 extern float global_chassis_yaw_rate;
+extern volatile uint8_t imu_yaw_cal_state;
+
+#define INS_YAW_CAL_IDLE      0U
+#define INS_YAW_CAL_RUNNING   1U
+#define INS_YAW_CAL_DONE      2U
 
 // 旧云台兼容变量，当前平衡车阶段不作为控制依据
 extern float global_gimbal_yaw;
@@ -55,6 +62,11 @@ float INS_GetBalanceAngle(void);
 float INS_GetBalanceRate(void);
 float INS_GetChassisYaw(void);
 float INS_GetChassisYawRate(void);
+float INS_GetChassisYawError(float target_yaw_deg);
 uint8_t INS_IsCalibrated(void);
+void INS_RequestYawCalibration(void);
+uint8_t INS_GetYawCalibrationState(void);
+float INS_GetYawBiasDps(void);
+void INS_RequestBalanceAngleReseed(void);
 
 #endif /* INS_TASK_H */

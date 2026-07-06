@@ -23,6 +23,7 @@
 #include "attitude_algorithm.h"
 #include "bsp_can.h"
 #include "config.h"
+#include "chassis_serial_cmd.h"
 #include "gimbal_task.h"
 
 /* BSP 层 (仅用于 Init 时注入函数指针) */
@@ -42,8 +43,15 @@ float global_imu_yaw_speed = 0.0f;
 float global_imu_pitch_speed = 0.0f;
 float global_balance_angle = 0.0f;
 float global_balance_rate = 0.0f;
+float global_balance_accel_angle = 0.0f;
+float global_balance_accel_forward_ms2 = 0.0f;
 float global_chassis_yaw = 0.0f;
 float global_chassis_yaw_rate = 0.0f;
+#if IMU_YAW_BIAS_KEY_CAL_ENABLE
+volatile uint8_t imu_yaw_cal_state = INS_YAW_CAL_IDLE;
+#else
+volatile uint8_t imu_yaw_cal_state = INS_YAW_CAL_DONE;
+#endif
 
 /* ======================== SPI DMA 缓冲区 (参考 QGimbal) ======================== */
 
@@ -88,6 +96,9 @@ static TaskHandle_t ins_task_handle_local = NULL;
 static float imu_gyro[3]  = {0};
 static float imu_accel[3] = {0};
 static float imu_temp     = 0.0f;
+static volatile uint8_t yaw_cal_request = 0U;
+static volatile uint8_t balance_reseed_request = 0U;
+static float yaw_bias_dps = CHASSIS_YAW_RATE_BIAS_DPS;
 
 /* ======================== 前向声明 ======================== */
 
@@ -97,10 +108,10 @@ static void accel_read_over(const uint8_t *rx_buf, float accel_out[3]);
 static void temperature_read_over(const uint8_t *rx_buf, float *temp_out);
 static float calc_balance_accel_angle(const float accel[3]);
 static float select_gyro_axis(const float gyro_dps[3], uint8_t axis);
+static float wrap_angle_360_deg(float angle_deg);
+static float wrap_angle_error_deg(float error_deg);
 static void vofa_rx_byte_callback(uint8_t byte);
 static uint8_t vofa_cmd_pop(uint8_t *line, uint8_t *len);
-static uint8_t vofa_parse_speed_cmd(const uint8_t *line, uint8_t len, float *rpm);
-static uint8_t vofa_parse_bias_cmd(const uint8_t *line, uint8_t len, float *bias_deg);
 
 #define VOFA_CMD_BUF_LEN    32U
 #define VOFA_CMD_QUEUE_LEN  16U
@@ -130,6 +141,7 @@ static bool vofa_send_adapter(const uint8_t *data, uint16_t len)
 void INS_Init(void)
 {
     /* ----- 1. BSP 初始化 ----- */
+    BSP_DWT_Init();
     BSP_SPI_Init();
 #if VOFA_UART_PORT == VOFA_UART_PORT_USART6
     BSP_UART6_Init();
@@ -201,14 +213,28 @@ void INS_Task(void *argument)
         uint8_t has_new_gyro = 0U;
         float imu_dt_sec = BALANCE_IMU_DT_SEC;
         static float imu_time_sec = 0.0f;
+        static uint32_t last_imu_update_us = 0U;
+        static uint8_t imu_dt_ready = 0U;
+#if VOFA_OUTPUT_ENABLE && (VOFA_OUTPUT_MODE == VOFA_OUTPUT_MODE_ENCODER) && \
+    (VOFA_DEBUG_STAGE == VOFA_DEBUG_STAGE_IMU_ATTITUDE)
+        static uint32_t loop_integrate_count = 0U;   /* 诊断：真实积分步计数 */
+        static uint32_t loop_count_at_last_vofa = 0U; /* 诊断：上次VOFA时的积分步数 */
+#endif
+        uint32_t imu_now_us;
 #if IMU_POLL_FALLBACK_ENABLE
         static uint32_t poll_fallback_divider = 0U;
 #endif
 
         /* 等待 SPI DMA 完成通知；超时只用于让任务可恢复，不更新旧数据。 */
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
+        imu_now_us = BSP_GetMicros();
 
         static float gyro_bias[3] = {0.0f, 0.0f, 0.0f};
+#if IMU_GYRO_BIAS_CAL_ENABLE
+        static float gyro_bias_sum[3] = {0.0f, 0.0f, 0.0f};
+        static uint32_t gyro_bias_count = 0U;
+        static uint8_t gyro_bias_ready = 0U;
+#endif
 
         /* 处理 DMA 读取完成的数据 */
         if (gyro_update_flag & (1 << IMU_UPDATE_SHFITS))
@@ -216,9 +242,6 @@ void INS_Task(void *argument)
             gyro_update_flag &= ~(1 << IMU_UPDATE_SHFITS);
             gyro_read_over(gyro_dma_rx_buf + BMI088_GYRO_RX_BUF_DATA_OFFSET, imu_gyro);
 
-            imu_gyro[0] -= gyro_bias[0];
-            imu_gyro[1] -= gyro_bias[1];
-            imu_gyro[2] -= gyro_bias[2];
             has_new_gyro = 1U;
         }
 
@@ -243,9 +266,9 @@ void INS_Task(void *argument)
             poll_fallback_divider = 0U;
 
             BMI088_Read(&g_bmi088);
-            imu_gyro[0] = g_bmi088.gyro[0] - gyro_bias[0];
-            imu_gyro[1] = g_bmi088.gyro[1] - gyro_bias[1];
-            imu_gyro[2] = g_bmi088.gyro[2] - gyro_bias[2];
+            imu_gyro[0] = g_bmi088.gyro[0];
+            imu_gyro[1] = g_bmi088.gyro[1];
+            imu_gyro[2] = g_bmi088.gyro[2];
             imu_accel[0] = g_bmi088.accel[0];
             imu_accel[1] = g_bmi088.accel[1];
             imu_accel[2] = g_bmi088.accel[2];
@@ -260,6 +283,53 @@ void INS_Task(void *argument)
          * BMI088 内部的加速度计和陀螺仪的坐标系是不同的！
          * 根据数据手册：Gyro 的 Y、Z 轴方向与 Accel 的 Y、Z 轴刚好相反。
          * 必须将它们统一到一个坐标系下，否则互补滤波会发生严重的轴耦合错乱。*/
+
+        /* dt = 相邻“真实样本”之间的 DWT 微秒间隔。
+         * 关键：只有走到这里才算一次真实样本（DMA新陀螺 或 fallback轮询），
+         * 循环因多源唤醒可能空转，但空转会在上面 continue，不会到这里积分。
+         * 不再把亚毫秒 dt 强拉成 1ms —— 那正是过积分的根源。
+         * 保证：所有积分步的 dt 之和 == 真实流逝时间。 */
+        if (imu_dt_ready) {
+            uint32_t dt_us = imu_now_us - last_imu_update_us;  /* 无符号差值，自动处理回绕 */
+            imu_dt_sec = (float)dt_us * 1e-6f;
+        }
+        last_imu_update_us = imu_now_us;
+        imu_dt_ready = 1U;
+        /* 只保留上限保护（首样本/长阻塞/回绕异常）；不设会伪造时间的下限。 */
+        if (imu_dt_sec <= 0.0f || imu_dt_sec > 0.020f) {
+            imu_dt_sec = BALANCE_IMU_DT_SEC;
+        }
+#if VOFA_OUTPUT_ENABLE && (VOFA_OUTPUT_MODE == VOFA_OUTPUT_MODE_ENCODER) && \
+    (VOFA_DEBUG_STAGE == VOFA_DEBUG_STAGE_IMU_ATTITUDE)
+        loop_integrate_count++;
+#endif
+
+#if IMU_GYRO_BIAS_CAL_ENABLE
+        if (gyro_bias_ready == 0U) {
+            gyro_bias_sum[0] += imu_gyro[0];
+            gyro_bias_sum[1] += imu_gyro[1];
+            gyro_bias_sum[2] += imu_gyro[2];
+            gyro_bias_count++;
+
+            if (gyro_bias_count >= IMU_GYRO_BIAS_CAL_SAMPLES) {
+                float inv_count = 1.0f / (float)gyro_bias_count;
+                gyro_bias[0] = gyro_bias_sum[0] * inv_count;
+                gyro_bias[1] = gyro_bias_sum[1] * inv_count;
+                gyro_bias[2] = gyro_bias_sum[2] * inv_count;
+                gyro_bias_ready = 1U;
+            }
+
+            imu_gyro[0] = 0.0f;
+            imu_gyro[1] = 0.0f;
+            imu_gyro[2] = 0.0f;
+        } else
+#endif
+        {
+            imu_gyro[0] -= gyro_bias[0];
+            imu_gyro[1] -= gyro_bias[1];
+            imu_gyro[2] -= gyro_bias[2];
+        }
+
         float gx_deg = imu_gyro[0] * Rad2Ang;
         float gy_deg = -imu_gyro[1] * Rad2Ang;
         float gz_deg = -imu_gyro[2] * Rad2Ang;
@@ -279,12 +349,47 @@ void INS_Task(void *argument)
         float accel_angle = accel_angle_lpf;
         float balance_rate = select_gyro_axis(gyro_dps, BALANCE_GYRO_AXIS) *
                              BALANCE_GYRO_SIGN;
-        float yaw_rate_raw = select_gyro_axis(gyro_dps, CHASSIS_YAW_GYRO_AXIS) *
-                             CHASSIS_YAW_GYRO_SIGN;
-        float yaw_rate = yaw_rate_raw - CHASSIS_YAW_RATE_BIAS_DPS;
-        float yaw_rate_kalman = KalmanScalar_Update(&g_yaw_rate_kalman, yaw_rate);
         static float yaw_raw_angle = 0.0f;
         static float yaw_kalman_angle = 0.0f;
+#if IMU_YAW_BIAS_KEY_CAL_ENABLE
+        static float yaw_cal_sum_dps = 0.0f;
+        static uint32_t yaw_cal_count = 0U;
+#endif
+#if IMU_YAW_BIAS_KEY_CAL_ENABLE
+        if (yaw_cal_request != 0U) {
+            yaw_cal_request = 0U;
+            yaw_cal_sum_dps = 0.0f;
+            yaw_cal_count = 0U;
+            imu_yaw_cal_state = INS_YAW_CAL_RUNNING;
+        }
+#else
+        yaw_cal_request = 0U;
+#endif
+
+        float yaw_rate_raw = select_gyro_axis(gyro_dps, CHASSIS_YAW_GYRO_AXIS) *
+                             CHASSIS_YAW_GYRO_SIGN;
+#if IMU_YAW_BIAS_KEY_CAL_ENABLE
+        if (imu_yaw_cal_state == INS_YAW_CAL_RUNNING) {
+            yaw_cal_sum_dps += yaw_rate_raw;
+            yaw_cal_count++;
+            if (yaw_cal_count >= IMU_YAW_BIAS_KEY_CAL_SAMPLES) {
+                yaw_bias_dps = yaw_cal_sum_dps / (float)yaw_cal_count;
+                imu_yaw_cal_state = INS_YAW_CAL_DONE;
+                yaw_raw_angle = 0.0f;
+                yaw_kalman_angle = 0.0f;
+                KalmanScalar_SetState(&g_yaw_rate_kalman, 0.0f);
+            }
+        }
+#endif
+
+        float yaw_rate = yaw_rate_raw - yaw_bias_dps;
+        /* 先做小死区抑制残余零偏积分，再过标量 Kalman 平滑掉抽样噪声。
+         * yaw 无重力参考，只能靠积分，任何未被压掉的小零偏都会线性漂移。 */
+        if ((CHASSIS_YAW_RATE_DEADBAND_DPS > 0.0f) &&
+            (fabsf(yaw_rate) < CHASSIS_YAW_RATE_DEADBAND_DPS)) {
+            yaw_rate = 0.0f;
+        }
+        float yaw_rate_kalman = KalmanScalar_Update(&g_yaw_rate_kalman, yaw_rate);
         static uint8_t kalman_ready = 0U;
 #if BALANCE_BOOT_ZERO_ENABLE
         static uint32_t zero_count = 0U;
@@ -303,10 +408,47 @@ void INS_Task(void *argument)
             kalman_ready = 1U;
         }
 
+        /* KEY 解锁瞬间用当前加速度角重播种：故障期间的陀螺积分误差
+         * 不带进新一轮控制，避免解锁后立刻再触发角度保护。 */
+        if (balance_reseed_request != 0U) {
+            balance_reseed_request = 0U;
+            KalmanAngle_SetAngle(&g_balance_kalman, accel_angle);
+        }
+
+#if BALANCE_ACCEL_GATE_ENABLE
+        /* 加速度模长偏离 1g 说明混入了车体平动加速度，此时加速度角
+         * 是假角，只做陀螺积分，不让污染写进角度和零漂估计。 */
+        float accel_norm_g = sqrtf(imu_accel[0] * imu_accel[0] +
+                                   imu_accel[1] * imu_accel[1] +
+                                   imu_accel[2] * imu_accel[2]) /
+                             BALANCE_ACCEL_GRAVITY_MS2;
+        float accel_innovation_deg;
+        uint8_t accel_gate_reject = 0U;
+
+        kalman_angle = KalmanAngle_Predict(&g_balance_kalman,
+                                           balance_rate,
+                                           imu_dt_sec);
+        accel_innovation_deg = accel_angle - kalman_angle;
+
+        if ((accel_norm_g < BALANCE_ACCEL_NORM_MIN_G) ||
+            (accel_norm_g > BALANCE_ACCEL_NORM_MAX_G)) {
+            accel_gate_reject = 1U;
+        }
+        if ((BALANCE_ACCEL_ANGLE_GATE_DEG > 0.0f) &&
+            (fabsf(accel_innovation_deg) > BALANCE_ACCEL_ANGLE_GATE_DEG)) {
+            accel_gate_reject = 1U;
+        }
+
+        if (accel_gate_reject == 0U) {
+            kalman_angle = KalmanAngle_Correct(&g_balance_kalman,
+                                               accel_angle);
+        }
+#else
         kalman_angle = KalmanAngle_Update(&g_balance_kalman,
                                           accel_angle,
                                           balance_rate,
                                           imu_dt_sec);
+#endif
 
 #if BALANCE_BOOT_ZERO_ENABLE
         if (zero_count < 1000U) {
@@ -323,11 +465,13 @@ void INS_Task(void *argument)
         imu_time_sec += imu_dt_sec;
         global_balance_angle = kalman_angle_view;
         global_balance_rate = KalmanAngle_GetRate(&g_balance_kalman);
+        global_balance_accel_angle = accel_angle;
+        global_balance_accel_forward_ms2 = imu_accel[BALANCE_AXIS_X];
         yaw_raw_angle += yaw_rate * imu_dt_sec;
         yaw_kalman_angle += yaw_rate_kalman * imu_dt_sec;
 
         global_chassis_yaw_rate = yaw_rate_kalman;
-        global_chassis_yaw = yaw_kalman_angle;
+        global_chassis_yaw = wrap_angle_360_deg(yaw_kalman_angle);
 
         global_gimbal_pitch = global_balance_angle;
         global_gimbal_yaw = global_chassis_yaw;
@@ -339,60 +483,113 @@ void INS_Task(void *argument)
         if ((uint32_t)(now_tick - vofa_last_send_tick) >= pdMS_TO_TICKS(VOFA_OUTPUT_PERIOD_MS))
         {
 #if VOFA_OUTPUT_MODE == VOFA_OUTPUT_MODE_ENCODER
-#if BALANCE_LQR_ENABLE
-#if BALANCE_LQR_OUTPUT_MODE == BALANCE_LQR_OUTPUT_MODE_SPEED
+#if VOFA_DEBUG_STAGE == VOFA_DEBUG_STAGE_MOTOR_FEEDBACK
+            float vofa_left_motor_enabled = (float)left_wheel_motor.enabled;
+            float vofa_right_motor_enabled = (float)right_wheel_motor.enabled;
+            float vofa_left_can_speed_rpm = left_wheel_motor.speed_can_rpm;
+            float vofa_right_can_speed_rpm = right_wheel_motor.speed_can_rpm;
+            float vofa_left_feedback_current_a = left_wheel_motor.current;
+            float vofa_right_feedback_current_a = right_wheel_motor.current;
+            float vofa_left_rx_count = (float)left_wheel_motor.rx_count;
+            float vofa_right_rx_count = (float)right_wheel_motor.rx_count;
+            float vofa_last_can_id = (float)can_last_std_id;
+            float vofa_last_can_dlc = (float)can_last_dlc;
+            float vofa_can_rx_count = (float)can_rx_count;
+            float vofa_fault_code = (float)chassis_fault_code;
             float vofa_channels[VOFA_OUTPUT_CHANNEL_COUNT] = {
-                balance_lqr_theta_deg,
-                balance_lqr_theta_rate_dps,
-                balance_lqr_theta_ref_deg,
-                balance_lqr_position_m,
-                balance_lqr_velocity_mps,
-                balance_lqr_force_theta_n,
-                balance_lqr_force_rate_n,
-                balance_lqr_force_n,
-                balance_lqr_current_target_a,
-                balance_lqr_current_cmd_a,
-                balance_lqr_current_feedback_a,
-                (float)chassis_fault_code
+                vofa_left_motor_enabled,
+                vofa_right_motor_enabled,
+                vofa_left_can_speed_rpm,
+                vofa_right_can_speed_rpm,
+                vofa_left_feedback_current_a,
+                vofa_right_feedback_current_a,
+                vofa_left_rx_count,
+                vofa_right_rx_count,
+                vofa_last_can_id,
+                vofa_last_can_dlc,
+                vofa_can_rx_count,
+                vofa_fault_code
             };
             if (vofa_header_sent == 0U) {
                 (void)Vofa_SendText(&g_vofa,
-                                    "theta_deg,theta_rate_dps,theta_ref_deg,x_m,v_mps,f_theta_n,f_rate_n,f_total_n,u_target_a,u_cmd_a,u_fb_a,fault\r\n");
+                                    "left_enabled,right_enabled,left_can_rpm,right_can_rpm,left_feedback_a,right_feedback_a,left_rx_count,right_rx_count,last_can_id,last_can_dlc,can_rx_count,fault\r\n");
+                vofa_header_sent = 1U;
+            }
+#elif VOFA_DEBUG_STAGE == VOFA_DEBUG_STAGE_IMU_ATTITUDE
+            float vofa_kalman_balance_angle_deg = kalman_angle_view;
+            float vofa_gyro_balance_rate_dps = global_balance_rate;
+            float vofa_accel_balance_angle_deg = global_balance_accel_angle;
+            float vofa_accel_x_ms2 = imu_accel[BALANCE_AXIS_X];
+            float vofa_accel_y_ms2 = imu_accel[BALANCE_AXIS_Y];
+            float vofa_accel_z_ms2 = imu_accel[BALANCE_AXIS_Z];
+            float vofa_imu_dt_ms = imu_dt_sec * 1000.0f;
+            float vofa_steps_per_vofa = (float)(loop_integrate_count - loop_count_at_last_vofa);
+            loop_count_at_last_vofa = loop_integrate_count;
+            float vofa_channels[VOFA_OUTPUT_CHANNEL_COUNT] = {
+                vofa_kalman_balance_angle_deg,
+                vofa_gyro_balance_rate_dps,
+                vofa_accel_balance_angle_deg,
+                vofa_accel_x_ms2,
+                vofa_accel_y_ms2,
+                vofa_accel_z_ms2,
+                vofa_imu_dt_ms,
+                vofa_steps_per_vofa
+            };
+            if (vofa_header_sent == 0U) {
+                (void)Vofa_SendText(&g_vofa,
+                                    "kalman_theta_deg,gyro_theta_rate_dps,accel_theta_deg,accel_x_ms2,accel_y_ms2,accel_z_ms2,imu_dt_ms,steps_per_vofa\r\n");
+                vofa_header_sent = 1U;
+            }
+#elif VOFA_DEBUG_STAGE == VOFA_DEBUG_STAGE_SPEED_LOOP
+            float vofa_left_speed_reference_rpm = wheel_speed_ref_left_rpm;
+            float vofa_left_actual_speed_rpm = wheel_speed_actual_left_rpm;
+            float vofa_left_current_command_a = wheel_speed_output_left_a;
+            float vofa_right_speed_reference_rpm = wheel_speed_ref_right_rpm;
+            float vofa_right_actual_speed_rpm = wheel_speed_actual_right_rpm;
+            float vofa_right_current_command_a = wheel_speed_output_right_a;
+            float vofa_channels[VOFA_OUTPUT_CHANNEL_COUNT] = {
+                vofa_left_speed_reference_rpm,
+                vofa_left_actual_speed_rpm,
+                vofa_left_current_command_a,
+                vofa_right_speed_reference_rpm,
+                vofa_right_actual_speed_rpm,
+                vofa_right_current_command_a
+            };
+            if (vofa_header_sent == 0U) {
+                (void)Vofa_SendText(&g_vofa,
+                                    "left_ref_rpm,left_actual_rpm,left_cmd_a,right_ref_rpm,right_actual_rpm,right_cmd_a\r\n");
                 vofa_header_sent = 1U;
             }
 #else
+            float vofa_balance_angle_deg = balance_pid_theta_deg;
+            float vofa_balance_rate_dps = balance_pid_theta_rate_dps;
+            float vofa_accel_angle_deg = balance_pid_accel_angle_deg;
+            float vofa_balance_angle_reference_deg = balance_pid_theta_ref_deg;
+            float vofa_balance_speed_reference_rpm = balance_pid_balance_speed_ref_rpm;
+            float vofa_left_speed_reference_rpm = wheel_speed_ref_left_rpm;
+            float vofa_left_actual_speed_rpm = wheel_speed_actual_left_rpm;
+            float vofa_left_current_command_a = wheel_speed_output_left_a;
+            float vofa_right_speed_reference_rpm = wheel_speed_ref_right_rpm;
+            float vofa_right_actual_speed_rpm = wheel_speed_actual_right_rpm;
+            float vofa_right_current_command_a = wheel_speed_output_right_a;
+            float vofa_fault_code = (float)chassis_fault_code;
             float vofa_channels[VOFA_OUTPUT_CHANNEL_COUNT] = {
-                balance_lqr_theta_deg,
-                balance_lqr_theta_rate_dps,
-                balance_lqr_theta_ref_deg,
-                balance_lqr_position_m,
-                balance_lqr_velocity_mps,
-                balance_lqr_force_theta_n,
-                balance_lqr_force_rate_n,
-                balance_lqr_force_n,
-                balance_lqr_current_target_a,
-                balance_lqr_current_cmd_a,
-                balance_lqr_current_feedback_a,
-                (float)chassis_fault_code
+                vofa_balance_angle_deg,
+                vofa_balance_rate_dps,
+                vofa_accel_angle_deg,
+                vofa_balance_angle_reference_deg,
+                vofa_balance_speed_reference_rpm,
+                vofa_left_speed_reference_rpm,
+                vofa_left_actual_speed_rpm,
+                vofa_left_current_command_a,
+                vofa_right_speed_reference_rpm,
+                vofa_right_actual_speed_rpm,
+                vofa_right_current_command_a,
+                vofa_fault_code
             };
             if (vofa_header_sent == 0U) {
                 (void)Vofa_SendText(&g_vofa,
-                                    "theta_deg,theta_rate_dps,theta_ref_deg,x_m,v_mps,f_theta_n,f_rate_n,f_total_n,u_target_a,u_cmd_a,u_fb_a,fault\r\n");
-                vofa_header_sent = 1U;
-            }
-#endif
-#else
-            float vofa_channels[VOFA_OUTPUT_CHANNEL_COUNT] = {
-                wheel_speed_ref_left_rpm,
-                wheel_speed_actual_left_rpm,
-                wheel_speed_output_left_a,
-                wheel_speed_ref_right_rpm,
-                wheel_speed_actual_right_rpm,
-                wheel_speed_output_right_a
-            };
-            if (vofa_header_sent == 0U) {
-                (void)Vofa_SendText(&g_vofa,
-                                    "l_ref,l_rpm,l_u,r_ref,r_rpm,r_u\r\n");
+                                    "theta_deg,theta_rate_dps,accel_deg,theta_ref_deg,balance_ref_rpm,left_ref_rpm,left_actual_rpm,left_cmd_a,right_ref_rpm,right_actual_rpm,right_cmd_a,fault\r\n");
                 vofa_header_sent = 1U;
             }
 #endif
@@ -453,14 +650,8 @@ void BT_RxTask(void *argument)
         /* 当前阶段蓝牙只作为 VOFA+ TX 物理链路，本任务保留为兼容占位。 */
         uint8_t line[VOFA_CMD_BUF_LEN];
         uint8_t len;
-        float rpm;
-
         while (vofa_cmd_pop(line, &len) != 0U) {
-            if (vofa_parse_bias_cmd(line, len, &rpm) != 0U) {
-                Balance_SetManualBiasDeg(rpm);
-            } else if (vofa_parse_speed_cmd(line, len, &rpm) != 0U) {
-                WheelSpeed_SetTargetRpm(rpm);
-            }
+            (void)ChassisSerialCmd_HandleLine(line, len);
         }
 
         vTaskDelay(pdMS_TO_TICKS(2));
@@ -537,97 +728,6 @@ static uint8_t vofa_cmd_pop(uint8_t *line, uint8_t *len)
     return 1U;
 }
 
-static uint8_t vofa_parse_speed_cmd(const uint8_t *line, uint8_t len, float *rpm)
-{
-    uint8_t i = 0U;
-    uint8_t has_digit = 0U;
-    uint8_t has_frac = 0U;
-    float sign = 1.0f;
-    float value = 0.0f;
-    float frac_scale = 0.1f;
-
-    if (line == NULL || rpm == NULL || len == 0U) {
-        return 0U;
-    }
-
-    while (i < len) {
-        uint8_t c = line[i];
-        if (c == '+' || c == '-' || c == '.' || (c >= '0' && c <= '9')) {
-            break;
-        }
-        i++;
-    }
-
-    if (i >= len) {
-        return 0U;
-    }
-
-    if (line[i] == '-') {
-        sign = -1.0f;
-        i++;
-    } else if (line[i] == '+') {
-        i++;
-    }
-
-    while (i < len) {
-        uint8_t c = line[i];
-        if (c >= '0' && c <= '9') {
-            has_digit = 1U;
-            if (has_frac == 0U) {
-                value = value * 10.0f + (float)(c - '0');
-            } else {
-                value += (float)(c - '0') * frac_scale;
-                frac_scale *= 0.1f;
-            }
-        } else if (c == '.' && has_frac == 0U) {
-            has_frac = 1U;
-        } else {
-            break;
-        }
-        i++;
-    }
-
-    if (has_digit == 0U) {
-        return 0U;
-    }
-
-    *rpm = sign * value;
-    return 1U;
-}
-
-static uint8_t vofa_parse_bias_cmd(const uint8_t *line, uint8_t len, float *bias_deg)
-{
-    uint8_t i = 0U;
-
-    if (line == NULL || bias_deg == NULL || len == 0U) {
-        return 0U;
-    }
-
-    while ((i < len) && line[i] == ' ') {
-        i++;
-    }
-
-    if (i >= len) {
-        return 0U;
-    }
-
-    if (line[i] == 'B' || line[i] == 'b') {
-        i++;
-        return vofa_parse_speed_cmd(line + i, (uint8_t)(len - i), bias_deg);
-    }
-
-    if ((i + 4U <= len) &&
-        (line[i] == 'b' || line[i] == 'B') &&
-        (line[i + 1U] == 'i' || line[i + 1U] == 'I') &&
-        (line[i + 2U] == 'a' || line[i + 2U] == 'A') &&
-        (line[i + 3U] == 's' || line[i + 3U] == 'S')) {
-        i += 4U;
-        return vofa_parse_speed_cmd(line + i, (uint8_t)(len - i), bias_deg);
-    }
-
-    return 0U;
-}
-
 static void gyro_read_over(const uint8_t *rx_buf, float gyro_out[3])
 {
     int16_t raw;
@@ -676,6 +776,24 @@ static float select_gyro_axis(const float gyro_dps[3], uint8_t axis)
         return gyro_dps[2];
     }
     return gyro_dps[0];
+}
+
+static float wrap_angle_360_deg(float angle_deg)
+{
+    angle_deg = fmodf(angle_deg, 360.0f);
+    if (angle_deg < 0.0f) {
+        angle_deg += 360.0f;
+    }
+    return angle_deg;
+}
+
+static float wrap_angle_error_deg(float error_deg)
+{
+    error_deg = fmodf(error_deg + 180.0f, 360.0f);
+    if (error_deg < 0.0f) {
+        error_deg += 360.0f;
+    }
+    return error_deg - 180.0f;
 }
 
 /* ======================== SPI DMA 调度 (参考 QGimbal) ======================== */
@@ -805,12 +923,41 @@ void BSP_SPI_DMA_RxCpltCallback(void)
 
 /* ======================== 数据获取 ======================== */
 
-float INS_GetYaw(void)       { return Yaw_a; }
+float INS_GetYaw(void)       { return global_chassis_yaw; }
 float INS_GetPitch(void)     { return Pitch_a; }
 float INS_GetRoll(void)      { return Roll_a; }
-float INS_GetYawTotal(void)  { return Yaw_TotalAngle; }
+float INS_GetYawTotal(void)  { return global_chassis_yaw; }
 float INS_GetBalanceAngle(void) { return global_balance_angle; }
 float INS_GetBalanceRate(void) { return global_balance_rate; }
 float INS_GetChassisYaw(void) { return global_chassis_yaw; }
 float INS_GetChassisYawRate(void) { return global_chassis_yaw_rate; }
+float INS_GetChassisYawError(float target_yaw_deg)
+{
+    return wrap_angle_error_deg(wrap_angle_360_deg(target_yaw_deg) -
+                                global_chassis_yaw);
+}
 uint8_t INS_IsCalibrated(void) { return g_bmi088.calibrated; }
+void INS_RequestYawCalibration(void)
+{
+#if IMU_YAW_BIAS_KEY_CAL_ENABLE
+    yaw_cal_request = 1U;
+#else
+    yaw_cal_request = 0U;
+    imu_yaw_cal_state = INS_YAW_CAL_DONE;
+#endif
+}
+
+uint8_t INS_GetYawCalibrationState(void)
+{
+    return imu_yaw_cal_state;
+}
+
+float INS_GetYawBiasDps(void)
+{
+    return yaw_bias_dps;
+}
+
+void INS_RequestBalanceAngleReseed(void)
+{
+    balance_reseed_request = 1U;
+}

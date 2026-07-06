@@ -11,6 +11,14 @@ volatile uint32_t can_wheel_rx_count = 0U;
 volatile uint32_t can_last_std_id = 0U;
 volatile uint32_t can_last_dlc = 0U;
 
+/*
+ * 反馈帧角度字段(byte6-7)按手册"与控制报文格式一致"解析:
+ * 16bit 满量程 0~65535 映射 0~360°,不再砍成 15bit。
+ * QD4310 编码器物理分辨率是 15bit,但那是传感器精度,协议编码仍是 16bit。
+ */
+#define MOTOR_ENCODER_COUNT  ((uint32_t)1UL << 16)          /* 65536 满量程 */
+#define MOTOR_ENCODER_MASK   ((uint16_t)0xFFFFU)
+
 static int16_t can_read_i16_le(const uint8_t *data)
 {
     return (int16_t)((uint16_t)data[0] | ((uint16_t)data[1] << 8));
@@ -183,12 +191,7 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan) {
             if (motor != NULL && rx_header.DLC >= 8U) {
                 float sign;
                 float angle;
-                float delta;
-                float elapsed_sec;
-                float speed_raw;
-                float speed_alpha;
                 uint32_t now_tick;
-                uint32_t elapsed_tick;
                 uint16_t encoder_raw;
 
                 sign = motor_feedback_sign((uint8_t)(rx_header.StdId - 0x500U));
@@ -197,50 +200,11 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan) {
                 motor->current = sign * can_read_i16_le(rx_data + 2) * 10.0f / 32767.0f;
                 motor->speed_can_rpm = sign * can_read_i16_le(rx_data + 4) * 1000.0f / 32767.0f;
 
-                encoder_raw = can_read_u16_le(rx_data + 6);
+                encoder_raw = can_read_u16_le(rx_data + 6) & MOTOR_ENCODER_MASK;
                 motor->encoder_raw = encoder_raw;
-                angle = encoder_raw * 360.0f / 65535.0f;
+                angle = (float)encoder_raw * 360.0f / (float)MOTOR_ENCODER_COUNT;
                 motor->angle = angle;
-
-                if (motor->init_flag == 0U) {
-                    motor->total_angle = 0.0f;
-                    motor->speed = 0.0f;
-                    motor->last_angle = angle;
-                    motor->speed_window_angle = 0.0f;
-                    motor->speed_window_tick = now_tick;
-                    motor->speed_ready = 0U;
-                    motor->init_flag = 1U;
-                } else {
-                    delta = angle - motor->last_angle;
-                    if (delta > 180.0f) {
-                        delta -= 360.0f;
-                    } else if (delta < -180.0f) {
-                        delta += 360.0f;
-                    }
-                    motor->total_angle += sign * delta;
-                    elapsed_tick = now_tick - motor->speed_window_tick;
-                    if (elapsed_tick >= pdMS_TO_TICKS(WHEEL_ENCODER_SPEED_WINDOW_MS)) {
-                        elapsed_sec = (float)elapsed_tick / (float)configTICK_RATE_HZ;
-                        speed_raw = (motor->total_angle - motor->speed_window_angle) *
-                                    (60.0f / 360.0f) / elapsed_sec;
-                        speed_alpha = WHEEL_ENCODER_SPEED_LPF_ALPHA;
-                        if (speed_alpha < 0.0f) {
-                            speed_alpha = 0.0f;
-                        } else if (speed_alpha > 1.0f) {
-                            speed_alpha = 1.0f;
-                        }
-
-                        if (motor->speed_ready == 0U) {
-                            motor->speed = speed_raw;
-                            motor->speed_ready = 1U;
-                        } else {
-                            motor->speed += speed_alpha * (speed_raw - motor->speed);
-                        }
-                        motor->speed_window_angle = motor->total_angle;
-                        motor->speed_window_tick = now_tick;
-                    }
-                    motor->last_angle = angle;
-                }
+                motor->init_flag = 1U;
 
                 motor->rx_count++;
                 motor->last_rx_tick = now_tick;
