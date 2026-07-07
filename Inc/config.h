@@ -148,20 +148,71 @@
 #define BALANCE_PID_THETA_REF_LIMIT_DEG     3.0f
 #define BALANCE_PID_ANGLE_INTEGRAL_LIMIT_DEG_S 4.0f
 #define BALANCE_PID_BALANCE_SPEED_LIMIT_RPM 320.0f
+#define BALANCE_PID_RUNTIME_SPEED_LIMIT_MIN_RPM 120.0f
 #define BALANCE_PID_ANGLE_KP_RPM_PER_DEG    35.00f
 #define BALANCE_PID_ANGLE_KI_RPM_PER_DEG_S  0.0f
 #define BALANCE_PID_RATE_KD_RPM_PER_DPS     0.400f
 #define BALANCE_POSITION_KP_DEG_PER_M       0.80f
 #define BALANCE_POSITION_KV_DEG_PER_MPS     2.50f
 #define BALANCE_POSITION_KA_DEG_PER_MPS2    0.0f
+/*
+ * 行走速度积分:已停用(=0)。14:49 数据证明它与轮速前馈死锁:
+ * 车不动->积分抬 theta_ref 到 +1.29deg->角度环输出 -17rpm
+ * 恰好抵消前馈 +17.5rpm->轮子净指令为 0,静摩擦锁死 13.8s。
+ * 前馈架构下摩擦由轮速内环破,不需要倾角积分;平地爬行不要再打开。
+ */
 #define BALANCE_POSITION_KI_DEG_PER_M_S     0.0f
-#define BALANCE_POSITION_INTEGRAL_LIMIT_M_S 0.20f
+#define BALANCE_POSITION_INTEGRAL_LIMIT_M_S 0.30f
 #define BALANCE_PID_KALMAN_ANGLE_WEIGHT     1.0f
 #define BALANCE_PID_ACCEL_ANGLE_WEIGHT      0.0f
 #define BALANCE_PID_WHEEL_SPEED_DEADBAND_MPS 0.010f
-#define BALANCE_MODE_FORWARD_VELOCITY_MPS   0.18f
-#define BALANCE_MODE_FORWARD_VELOCITY_LIMIT_MPS 0.35f
-#define BALANCE_MODE_VELOCITY_RAMP_MPS_PER_SEC 0.30f
+#define BALANCE_MODE_VELOCITY_RAMP_MPS_PER_SEC 0.08f
+/*
+ * 前进/后退不再使用固定开环 bias(巡航速度 = (bias-摩擦角-零点误差)/Kv,
+ * 摩擦(±1.4deg)和零点漂移都比 bias 本身大,只能"不走或冲")。
+ * 改为速度闭环目标 ±BALANCE_MODE_DRIVE_VELOCITY_MPS,倾角由外环自己算。
+ */
+#define BALANCE_MODE_STAND_BIAS_DEG         0.0f
+#define BALANCE_MODE_FORWARD_BIAS_DEG       0.0f
+#define BALANCE_MODE_BACKWARD_BIAS_DEG      0.0f
+/*
+ * 行走速度必须在"平滑滚动窗口"内,不能贴着摩擦楼板爬:
+ * 数据实测粘滑破摩擦自然窜速 0.25m/s,不可回收区 >0.4~0.5m/s(守卫封顶)。
+ * 0.06m/s(18rpm) 在楼板以下,表现只能是"不动或窜";
+ * 0.20m/s(62rpm) 在窗口中间,且是轮速内环验证过的舒适区。
+ */
+#define BALANCE_MODE_DRIVE_VELOCITY_MPS     0.20f
+/*
+ * 闭环限速守卫:|v| 超过 ON 阈值时把速度目标强制为 0(撤销前进指令,
+ * 全部外环权限用于刹车),并冻结速度积分;低于 OFF 阈值恢复。带迟滞防抖。
+ * 依据:v>0.5m/s 后 theta_ref ±3deg 限幅使最大减速度仅 0.51m/s^2,
+ * 且轮速上限 320rpm≈1.04m/s 吃不起非最小相位刹车瞬态,属不可回收区。
+ * 只修改外环速度目标,不触碰直立角度环任何量。
+ */
+#define BALANCE_SPEED_GUARD_ON_MPS          0.40f
+#define BALANCE_SPEED_GUARD_OFF_MPS         0.15f
+/*
+ * 零点自学习:静止直立时车实际站住的角度就是物理零点(定义如此),
+ * 用 50s 时间常数的慢积分在线吸收加速度计温漂/机械变动,
+ * 取消"每个会话手动重调 offset/B" 的环节。
+ * 门控:仅 stand 模式、已在闭环、小角度、小角速度、车与轮都静止时学习;
+ * 被推/行走/摔倒全部冻结。与直立环时间尺度差 ~50 倍,动力学解耦。
+ * 学到的 trim 只在 RAM,掉电回到 BALANCE_ANGLE_OFFSET_DEG 基准。
+ */
+#define BALANCE_ZERO_TRIM_ENABLE            1U
+#define BALANCE_ZERO_TRIM_RATE_PER_SEC      0.02f
+#define BALANCE_ZERO_TRIM_LIMIT_DEG         2.0f
+#define BALANCE_ZERO_TRIM_GATE_V_MPS        0.03f
+#define BALANCE_ZERO_TRIM_GATE_RATE_DPS     10.0f
+#define BALANCE_ZERO_TRIM_GATE_THETA_DEG    3.0f
+#define BALANCE_ZERO_TRIM_GATE_WHEEL_RPM    5.0f
+/*
+ * 守卫期间积分向 0 衰减(不是冻结):冻结会让起步攒满的 +1.5deg 积分
+ * 在超速时继续同向助推(v=0.4 时速度项 -1.0deg 压不过它,净 +0.5deg)。
+ * 0.60 m/s 速率 = 0.5s 内清完 0.30m 积分限幅,之后刹车全额生效;
+ * 衰减到 0 即停,不会积成反向,windup 保护仍然成立。
+ */
+#define BALANCE_SPEED_GUARD_INTEGRAL_DECAY_M_PER_S 0.60f
 #define BALANCE_MODE_TURN_SPEED_RPM         45.0f
 #define BALANCE_PID_POLARITY                1.0f
 #define BALANCE_PID_POSITION_SIGN           1.0f
@@ -216,8 +267,13 @@
 #define CHASSIS_YAW_RATE_KALMAN_Q    0.10f
 #define CHASSIS_YAW_RATE_KALMAN_R    0.50f
 
-/* 机械安装固定偏置；开机零点会在此基础上再归零。 */
-#define BALANCE_ANGLE_OFFSET_DEG     (-2.5f)
+/* 机械安装固定偏置；开机零点会在此基础上再归零。
+ * 注意:该零点存在 ±1~1.5deg 的会话间漂移(疑似加速度计温漂/机械变动):
+ *   上午数据(offset=-2.5 时代)零点在显示 +2.0deg -> 改 -0.5f;
+ *   下午现场(offset=-0.5 时代)需要 B-1.5 才立得住 -> 改 -2.0f。
+ * 若下次又漂,不要再重烧固件追常数:开机后用 B 命令做会话级 trim,
+ * 或实现 stand 模式下的慢速零点自学习。 */
+#define BALANCE_ANGLE_OFFSET_DEG     (-2.0f)
 /* Balance car must not treat power-on pose as zero. Use fixed mechanical offset only. */
 #define BALANCE_BOOT_ZERO_ENABLE     0
 

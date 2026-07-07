@@ -1658,3 +1658,664 @@
   - 重推后 `position_m` 不应长时间贴 1.0m，真实原点不再丢失。
   - 若低频前后摆（位置过零明显增多），KP 退 0.5~0.6。
 - 然后进入 `forward` 直走 → `stand` 停车测试。
+
+## 2026-07-07 forward 降为爬行速度并修复裸数字模式命令
+
+### 修改原因
+
+- 现场反馈 `forward` 速度仍偏快，希望降到很慢、随时可以停车的程度。
+- 之前发送裸 `1`/`0` 没有切换模式：代码只识别 `m1/m0` 或 `forward/stand`，裸数字会落到最后的浮点解析，变成轮速测试目标值，对当前 `BALANCE_PID` 模式基本无效。
+
+### 参数修改
+
+| 参数 | 旧值 | 新值 | 原因 |
+|---|---:|---:|---|
+| `BALANCE_MODE_FORWARD_VELOCITY_MPS` | `0.18f` | `0.06f` | 将 forward 目标速度降为约 6cm/s 的爬行速度 |
+| `BALANCE_MODE_FORWARD_VELOCITY_LIMIT_MPS` | `0.35f` | `0.12f` | 限制 forward 速度目标上限，避免后续误设过快 |
+| `BALANCE_MODE_VELOCITY_RAMP_MPS_PER_SEC` | `0.30f` | `0.10f` | 放慢起步斜坡，减少突然前窜 |
+
+### 命令解析修改
+
+- `chassis_serial_cmd.c` 中 `cmd_parse_mode()` 增加裸单字符数字模式识别：
+  - `0` = `stand`
+  - `1` = `forward`
+  - `2` = `stop`
+  - `3` = `left`
+  - `4` = `right`
+- 仍保留原命令：`m0/m1/m2`、`mode 0/1/2`、`stand/forward/stop`。
+- 多位数字或小数仍走轮速目标解析，不影响 `50`、`100` 等速度测试指令。
+
+### 验证
+
+- `arm-none-eabi-gcc -fsyntax-only` 已通过：
+  - `Application/gimbal/gimbal_task.c`
+  - `Application/gimbal/chassis_serial_cmd.c`
+
+### 下一步测试
+
+- 烧录后清空 VOFA，先发 `B0`，再测试：
+  - `1`：进入极慢 forward。
+  - `0` 或 `2`：随时停车/站立。
+- 若 `0.06m/s` 太慢到克服不了地面摩擦，再小幅加到 `0.08f`；若仍感觉快，再降到 `0.04f`。
+
+## 2026-07-07 forward 无明显响应根因：直立执行限幅被压到 20rpm
+
+### 数据结论
+
+- 最新 `vofa+.csv` 中 `1` 命令实际已经生效：
+  - `position_error_m` 从约 0 逐步增长到约 `0.93m`。
+  - `speed_theta_ref_deg` 从 0 逐步增长到约 `1.07deg`。
+  - `position_error_m` 斜率约为 `0.06m/s`，符合当前 `BALANCE_MODE_FORWARD_VELOCITY_MPS=0.06f`。
+- 因此问题不是 `forward` 目标没有进入位置/速度外环，而是后级执行权限不足。
+- 数据中 `balance_ref_rpm` 长时间被卡在 `±20rpm`，约 `11.7s` 顶限幅；这不是前进速度，而是直立环给轮速内环的目标轮速权限。
+- `±20rpm` 对直立/前进都过低，车无法跟上 moving `position_ref`，导致 `position_error_m` 越积越大，最终触发 `fault=3` 大角度保护。
+- 触发 `fault=3` 后 `emergency_stop=1`，串口 `0/1/2` 只会改模式，不会重新解锁电机；必须按 KEY 重新解锁。
+
+### 修复内容
+
+| 修改项 | 旧值/旧逻辑 | 新值/新逻辑 | 原因 |
+|---|---:|---:|---|
+| `BALANCE_PID_RUNTIME_SPEED_LIMIT_MIN_RPM` | 无 | `120.0f` | 防止在线命令 `O20/L20` 把直立执行权限压到无法平衡的 20rpm |
+| `Balance_SetPidRuntimeParam(... SPEED_LIMIT ...)` | 运行时限幅可夹到 `20rpm` | 最低夹到 `120rpm` | 保留在线调参能力，但禁止危险低限幅 |
+| VOFA I14 | `position_sign` | `chassis_mode` | 直接确认 `0/1/2` 是否切换模式 |
+| VOFA I15 | `velocity_sign` | `runtime_speed_limit_rpm` | 直接确认直立环执行限幅是否被压低 |
+
+### 新 VOFA 通道末两列
+
+| 通道 | 含义 |
+|---|---|
+| I14 | `chassis_mode`：`0=stand`，`1=forward`，`2=stop`，`3=left`，`4=right` |
+| I15 | `runtime_speed_limit_rpm`：当前直立环输出轮速限幅，正常应接近 `320`，不应再出现 `20` |
+
+### 验证
+
+- `arm-none-eabi-gcc -fsyntax-only` 已通过：
+  - `Application/ins/ins_task.c`
+  - `Application/gimbal/gimbal_task.c`
+  - `Application/gimbal/chassis_serial_cmd.c`
+
+### 下一步测试
+
+- 烧录后重新上电/复位，清空 VOFA。
+- 按 KEY 解锁后发：
+  - `B0`
+  - `1` 进入慢速 forward
+  - `0` 或 `2` 停车/站立
+- 判断：
+  - I14 应从 `0` 变 `1`，再变回 `0/2`。
+  - I15 应为 `320` 附近，至少不应为 `20`。
+  - 若触发 `fault=3`，先扶正并按 KEY 重新解锁，再继续测。
+
+## 2026-07-07 forward 指令已生效但结构会攒误差后突然冲
+
+### 最新数据结论
+
+- 新版 VOFA 已确认烧录生效：
+  - I14 为 `chassis_mode`。
+  - I15 为 `runtime_speed_limit_rpm`。
+- `vofa+.csv` 中 `1` 命令确实生效：
+  - `t=4.70s` 后 I14 从 `0` 变为 `1`。
+  - I15 全程为 `320`，直立执行限幅已恢复，不再是 `20rpm`。
+- 但 forward 行为仍不对：
+  - `1` 后车最初基本不动，`position_error_m` 持续积累。
+  - `position_error_m` 从约 `0` 积到 `1.6m` 量级，`speed_theta_ref_deg` 后期达到 `2.7deg` 左右。
+  - 车随后突然大幅动作，最终 `theta` 超过 `30deg`，触发 `fault=3`。
+- 根因不是命令没进，而是原 forward 结构把 `position_ref` 按速度目标持续积分；低速/静摩擦下车不动时，位置误差会越攒越大，最终变成一次大动作。
+
+### 控制结构修改
+
+| 修改项 | 旧逻辑 | 新逻辑 | 目的 |
+|---|---|---|---|
+| `BALANCE_MODE_FORWARD_POSITION_LEAD_M` | 无 | `0.35f` | forward 时只保持一个有限的前方跟随点 |
+| forward `position_ref` | `position_ref += velocity_ref * dt`，可长期积累误差 | `position_ref` 以斜坡靠近 `measured_position + 0.35m` | 防止车不动时误差无限积累，避免“先没反应、后突然冲” |
+| stand/stop `position_ref` | 保持原逻辑 | 不变 | 停车/站立仍锁当前位置 |
+
+### 预期表现
+
+- 发 `1` 后，I14 应变为 `1`。
+- `speed_theta_ref_deg` 应在几秒内上升到约 `0.3~0.5deg`，但不应继续积到 `2~3deg`。
+- 车如果克服不了静摩擦，应该只是轻微尝试前走，不应继续攒误差到摔车。
+- 若仍完全不走，可小幅增加 `BALANCE_MODE_FORWARD_POSITION_LEAD_M` 到 `0.45f`；若仍太冲，则降到 `0.25f`。
+
+## 2026-07-07 改为按测试 bias 实现前进/后退/停止
+
+### 最新 bias 数据结论
+
+- 最新数据中 `1` 命令仍然已经进模式：
+  - I14 从 `0` 变为 `1`，即 `chassis_mode=forward`。
+  - I15 大部分为 `120`，说明运行时速度限幅被压到最低钳位，但不再是旧的 `20rpm`。
+- 用户测试过的 bias 档位：
+  - `B0.5`：稳定，但基本不走，`velocity_mps` 接近 0。
+  - `B1.0`：能产生明显动作，是当前可用的前进量级。
+  - `B2.0`：过猛，短时间内角度明显增大并接近/触发保护，不适合作为默认行走。
+- 原 forward 结构仍不符合当前需求：用户希望按测试 bias 直接实现前进/后退/停止，而不是靠移动位置参考。
+
+### 控制结构修改
+
+| 修改项 | 旧逻辑 | 新逻辑 |
+|---|---|---|
+| `CHASSIS_MODE_FORWARD` | moving `position_ref`/速度目标 | 固定模式 bias `+1.0deg` |
+| `CHASSIS_MODE_BACKWARD` | 无 | 固定模式 bias `-1.0deg` |
+| `0`/`stop` | `stand/stop` 混用 | 统一为 `stand`，bias 为 0 |
+| `2` | 原 `stop` | 改为 `backward` |
+| mode 切换 | 可能叠加之前手动 `B` | 切模式时自动 `Balance_SetManualBiasDeg(0)`，防止手动 bias 残留 |
+| 行走模式位置环 | 可能积累位置误差 | `position_ref = measured_position`，`position_error=0`，不再攒误差 |
+| 行走模式速度环 | 原速度目标前进 | 目标速度为 0，只保留速度阻尼；实际目标角由 mode bias 提供 |
+
+### 当前命令
+
+| 命令 | 含义 |
+|---|---|
+| `0` / `stand` / `stop` | 停止并站立，模式 bias 清零 |
+| `1` / `forward` / `go` | 前进，模式 bias `+1.0deg` |
+| `2` / `backward` / `back` / `reverse` | 后退，模式 bias `-1.0deg` |
+| `3` / `left` | 左转 |
+| `4` / `right` | 右转 |
+
+### 新参数
+
+| 参数 | 当前值 | 说明 |
+|---|---:|---|
+| `BALANCE_MODE_FORWARD_BIAS_DEG` | `1.0f` | 根据 `B1.0` 测试作为默认前进 bias |
+| `BALANCE_MODE_BACKWARD_BIAS_DEG` | `(-1.0f)` | 后退使用对称 bias |
+
+### 验证
+
+- `arm-none-eabi-gcc -fsyntax-only` 已通过：
+  - `Application/gimbal/gimbal_task.c`
+  - `Application/gimbal/chassis_serial_cmd.c`
+  - `Application/ins/ins_task.c`
+
+### 下一步测试
+
+- 烧录后重新上电/复位，清空 VOFA，按 KEY 解锁。
+- 直接测试：
+  - `1`：应看到 I14=1，`theta_ref_deg` 约 `+1deg` 附近。
+  - `0`：应看到 I14=0，`theta_ref_deg` 回到 0 附近并停车。
+  - `2`：应看到 I14=2，`theta_ref_deg` 约 `-1deg` 附近。
+- 若 `1deg` 仍嫌猛，把 `BALANCE_MODE_FORWARD_BIAS_DEG` 降到 `0.8f`；若仍不走，再回升到 `1.2f`，不要用 `2.0f` 做默认。
+
+## 2026-07-07 最新 bias 数据结论：B0 保持，B1 前进
+
+### 数据范围
+
+- 最新 `vofa+.csv`：约 `16440` 行，按 20ms 估算约 `328.8s`。
+- I14 全程为 `0`，说明本组数据没有进入 `chassis_mode=forward`，只是在 `stand` 模式下测试手动 `B` bias。
+- I15 全程为 `320`，说明直立执行限幅正常，没有再被压到 `20/120rpm`。
+
+### bias 结论
+
+| bias | 数据表现 | 结论 |
+|---:|---|---|
+| `B0` | 前 35.4s 稳定，`theta` 均值约 `-0.60deg`，平均速度绝对值约 `0.016m/s` | 当前保持平衡用 `0deg`，不需要额外手动 bias |
+| `B0.5` | 有较多运动/扰动段，且后段接近保护边界；不适合作为明确前进指令 | 太小且不干净，不推荐作为前进默认 |
+| `B1.0` | 最长稳定段约 `98.9s`，`theta` 平均绝对值约 `0.59deg`，可产生明显动作但整体不失控 | 当前前进默认使用 `+1.0deg` 合理 |
+| `B2.0` | 短段可站住，但过猛，历史数据中也接近/触发保护 | 不作为默认前进 bias |
+| `B-1.0` | 可作为后退方向参考，但运动扰动比 `B+1.0` 更明显 | 后退先用 `-1.0deg`，若太猛降到 `-0.8deg` |
+
+### 当前建议
+
+- 保持平衡/停止：`bias = 0.0deg`。
+- 前进：`bias = +1.0deg`。
+- 后退：`bias = -1.0deg` 先试；若后退更冲，改为 `-0.8deg`。
+- 如果用户确实发送了 `1`，但 I14 仍为 `0`，说明 `1` 命令没有进入模式解析；下一步应优先查串口发送是否带换行、是否发到当前 VOFA UART、以及是否烧录了裸数字模式命令版本。
+
+## 2026-07-07 config 清理为 bias-only 行走模式
+
+### 修改内容
+
+- 删除/停用容易误导的旧 forward 速度/位置参数：
+  - `BALANCE_MODE_FORWARD_VELOCITY_MPS`
+  - `BALANCE_MODE_FORWARD_VELOCITY_LIMIT_MPS`
+  - `BALANCE_MODE_FORWARD_POSITION_LEAD_M`
+- 当前行走模式只由 bias 参数决定：
+
+| 参数 | 当前值 | 含义 |
+|---|---:|---|
+| `BALANCE_MODE_STAND_BIAS_DEG` | `0.0f` | 停止/保持平衡 |
+| `BALANCE_MODE_FORWARD_BIAS_DEG` | `1.0f` | 前进 |
+| `BALANCE_MODE_BACKWARD_BIAS_DEG` | `(-1.0f)` | 后退 |
+
+### 验证
+
+- `Application/gimbal/gimbal_task.c` 已通过 `arm-none-eabi-gcc -fsyntax-only`。
+
+## 2026-07-07 最新短数据：B0 仍优先用于站立
+
+### 数据范围
+
+- 最新 `vofa+.csv`：`3660` 行。
+- I14 全程为 `0`，说明本组数据没有真正进入 `chassis_mode=1` 前进模式。
+- I15 基本为 `320rpm`，直立执行限幅正常。
+- fault 分布：`fault=0` 为 `2806` 行，末尾 `fault=3` 为 `854` 行；末尾摔倒段不能用于评价正常站立 bias。
+
+### 关键段
+
+| 段 | bias | 数据表现 | 结论 |
+|---|---:|---|---|
+| 开头稳定段 | `0deg` | `984` 行，`theta` 均值约 `-0.046deg`，范围约 `-0.922~0.747deg`，平均速度约 `0.010m/s` | `B0` 本身站立最好 |
+| 中间测试段 | `-2deg` | `theta` 均值约 `-2.281deg`，最小到 `-5.025deg` | 偏大，不适合作为停止点 |
+| 中间测试段 | `-1deg` | `theta` 均值约 `-0.928deg`，平均速度约 `0.053m/s`，平均轮速约 `16rpm` | 会产生运动趋势，不适合作为停止点 |
+| 回零前后 | `-1deg -> 0deg` | 回到 `0deg` 前车体已经有约 `0.9m/s` 速度、角度升到 `5deg+`，随后进入 `fault=3` | 这不是 `B0` 静态立不住，而是高速/大角度状态下回零已来不及救回 |
+
+### 当前判断
+
+- 停止/站立仍选 `B0`，不要用 `B1` 当站立点。
+- `B1` 是前进偏置；本组最新数据没有出现 `+1deg` 或 `mode=1` 段，不能用这组数据证明 `1` 比 `0` 更适合站立。
+- 如果体感觉得 `0` 有轻微偏倒，应优先微调机械零点或 `BALANCE_MODE_STAND_BIAS_DEG` 的小量 trim，例如 `0.1deg` 级别，不应直接改成 `1deg`。
+
+## 2026-07-07 速度/位置外环减速效果判断
+
+### 数据现象
+
+- 在最新短数据的 `B-1` 后段，速度从约 `0.30m/s` 增加到 `0.94m/s`。
+- 同时 `speed_theta_ref_deg` 从约 `-1.28deg` 继续变到 `-3.00deg`，`theta_ref_deg` 已经被 `BALANCE_PID_THETA_REF_LIMIT_DEG = 3.0f` 限死。
+- `balance_ref_rpm` 从约 `90rpm` 增加到 `320rpm`，末端已经打到 `BALANCE_PID_BALANCE_SPEED_LIMIT_RPM`。
+
+### 判断
+
+- 速度/位置外环不是完全没起作用；VOFA 上能看到它在不断改变 `speed_theta_ref_deg`。
+- 但在当前符号和限幅下，它没有形成有效减速，表现为速度越大，`speed_theta_ref_deg` 越负，最终叠加到更负的 `theta_ref_deg`，内环继续给正向轮速去追车体角度。
+- 一旦车体角度已经大、轮速参考接近 `320rpm`，直立优先级会压过速度控制，外环已经没有足够权限把车慢慢刹住。
+
+### 下一步优先级
+
+- 不优先继续加大 `BALANCE_POSITION_KV_DEG_PER_MPS`，因为当前已经会打到 `theta_ref` 限幅。
+- 优先验证速度/位置外环符号：当前 `BALANCE_PID_POSITION_SIGN = +1`、`BALANCE_PID_VELOCITY_SIGN = +1` 对这段运动表现像同向加速；下一步可试反外环符号或反外环输出符号。
+- 行走 bias 也要加速度保护：速度超过小阈值后应自动削弱/取消 bias，避免一直把车推向限幅。
+
+## 2026-07-07 外环符号严格推导与最新 mode=1 数据
+
+### 不能用直立表现反推外环符号
+
+- `B0` 能站住只能证明直立内环、轮速环、角度反馈在小速度附近没有整体反掉。
+- 直立环优先级最高：当车身角度偏了，直立环会优先追 `theta_ref`，因此它可以把外环符号问题暂时掩盖掉。
+- 外环符号必须从公式求导判断，不能只看“能不能短时间站住”。
+
+### 当前代码公式
+
+```c
+speed_error_mps = balance_velocity_ref_ramp_mps - measured_velocity_mps;
+position_error_m = balance_position_ref_m - measured_position_m;
+
+speed_theta_ref_deg =
+    BALANCE_POSITION_KP_DEG_PER_M * position_error_m +
+    BALANCE_POSITION_KV_DEG_PER_MPS * speed_error_mps +
+    accel_theta_ref_deg +
+    BALANCE_POSITION_KI_DEG_PER_M_S * balance_speed_integral_m;
+
+theta_ref_deg = manual_bias + mode_bias + speed_theta_ref_deg;
+theta_error_deg = theta_deg - theta_ref_deg;
+
+balance_speed_ref_rpm =
+    (Kp * theta_error_deg + Ki * integral + Kd * theta_rate_dps) *
+    BALANCE_PID_POLARITY;
+```
+
+当前参数：
+
+| 参数 | 当前值 |
+|---|---:|
+| `BALANCE_PID_POLARITY` | `+1` |
+| `BALANCE_PID_POSITION_SIGN` | `+1` |
+| `BALANCE_PID_VELOCITY_SIGN` | `+1` |
+| `BALANCE_POSITION_KP_DEG_PER_M` | `0.80` |
+| `BALANCE_POSITION_KV_DEG_PER_MPS` | `2.50` |
+| `BALANCE_PID_ANGLE_KP_RPM_PER_DEG` | `35.00` |
+
+### 由公式得到的符号结论
+
+只看 P 项，直立内环输出为：
+
+```text
+u = balance_speed_ref_rpm = Kp_angle * (theta - theta_ref)
+```
+
+所以：
+
+```text
+du / d(theta_ref) = -Kp_angle < 0
+```
+
+结论：
+
+- 增大 `theta_ref` 会让轮速参考 `u` 往负方向变化。
+- 减小 `theta_ref` 会让轮速参考 `u` 往正方向变化。
+
+如果当前测得车速 `v > 0`，想减速，轮速参考应该往负方向给，也就是需要：
+
+```text
+v > 0  =>  theta_ref 修正量应该为正
+```
+
+但当前速度外环是：
+
+```text
+speed_error = 0 - v = -v
+speed_theta_ref = Kv * speed_error = -Kv * v
+```
+
+在 `Kv > 0` 时：
+
+```text
+v > 0  =>  speed_theta_ref < 0
+speed_theta_ref < 0  =>  theta_ref 变小
+theta_ref 变小  =>  balance_speed_ref 往正方向变大
+```
+
+这和减速需求相反。也就是说，在当前正向速度定义下，速度外环符号是反的。
+
+位置环同理。如果测得位置 `x > 0`，要拉回原点，需要负向轮速，即 `theta_ref` 应为正；但当前：
+
+```text
+position_error = 0 - x = -x
+position_theta_ref = Kp_pos * position_error = -Kp_pos * x
+```
+
+同样会让 `theta_ref` 变小，导致轮速参考往正方向变大，和拉回方向相反。
+
+### 等价修正方式
+
+以下两类改法等价，建议只选一种：
+
+| 改法 | 含义 |
+|---|---|
+| 把 `BALANCE_PID_POSITION_SIGN` 和 `BALANCE_PID_VELOCITY_SIGN` 从 `+1` 改成 `-1` | 保持外环公式不变，反转进入外环的位置/速度定义 |
+| 保持测量 sign 不变，但把外环误差改成 `measured - target` | 反转外环输出符号 |
+
+更小改动是先改：
+
+```c
+#define BALANCE_PID_POSITION_SIGN           (-1.0f)
+#define BALANCE_PID_VELOCITY_SIGN           (-1.0f)
+```
+
+注意：
+
+- 行走 bias 模式里当前 `position_error=0`，所以前进/后退时主要先验证 `VELOCITY_SIGN`。
+- 停止/站立模式会用到位置环，因此最终 `POSITION_SIGN` 也应一起改，否则停车拉回方向仍可能反。
+- 改完后必须先测 `0` 站立，再测轻推车体，看 `v>0` 时 `speed_theta_ref` 是否变为正、`balance_ref_rpm` 是否往负方向刹车。
+
+### 最新 `vofa+.csv` 数据
+
+- 文件时间：`2026-07-07 11:16:07`。
+- 总行数：`8891`。
+- I14 分布：`mode=0` 有 `248` 行，`mode=1` 有 `8643` 行。
+- fault 分布：`fault=0` 有 `7510` 行，`fault=3` 有 `1381` 行。
+- I15 为 `320rpm`，直立输出限幅正常。
+- 这次 `1` 命令已经进入控制模式，问题不是“1 没发进去”。
+
+### 最新数据关键段
+
+| 行范围 | mode | 数据表现 | 结论 |
+|---:|---:|---|---|
+| `0-247` | `0` | `theta` 均值约 `0.017deg`，速度约 `0m/s` | `0` 静态站立正常 |
+| `248-1030` | `1` | `theta_ref` 约 `1.000deg`，`theta` 均值约 `0.994deg`，速度约 `0m/s`，轮速参考约 `0rpm` | `1` 已生效，但只是把车体目标角保持在 `1deg`，没有形成稳定前进 |
+| `1031-1682` | `1` | 出现速度到约 `0.88m/s` 的运动，随后进入 `fault=3` | 有运动但不可控，不能算完成直走 |
+| `3064-4662` | `1` | `theta_ref` 约 `1deg`，速度均值接近 `0`，但有 `-0.8~0.9m/s` 的扰动峰值 | 仍不是稳定直线匀速 |
+| `6199-7241` | `1` | `theta_ref` 接近 `3deg`，速度仍接近 `0` | 更大 bias 也可能只是改变静态目标角，不一定产生可控前进 |
+| `7243-7304` | `1` | 速度升到约 `0.99m/s`，`balance_ref` 平均约 `199rpm` | 一旦动起来，直立环输出变大，速度没有被温和限制住 |
+| `8645-8890` | `1` | 末尾回到约 `1deg`，速度约 `0m/s` | 仍没有稳定直走 |
+
+### 最新判断
+
+- 当前 `mode=1` 命令链路是通的。
+- 当前 `+1deg` bias 能改变目标角，但不能可靠地产生稳定直走：要么几乎不走，要么速度起来后进入大扰动/故障。
+- 根据公式，速度/位置外环符号在当前测量定义下是反的；这比“看直立能不能站住”更可靠。
+- 下一步应先修正外环符号，再继续谈前进 bias 大小；否则加大 bias 只会更容易把直立环推到限幅。
+
+## 2026-07-07 上节符号推导作废：被控对象回归证明三层极性全部正确
+
+### 为什么上节推导是错的（必须记住，第三次踩同一个坑）
+
+- 上节用 `du/d(theta_ref) = -Kp < 0` 推"theta_ref 变小 → 轮速变正 → 与减速需求相反"。这只描述**瞬时**轮速方向，是非最小相位零点：刹车必须先让轮子与车速同向加速，把车身甩成反向倾角，再靠倾角减速。**这与 07-06"速度外环极性修正回 +1"一节作废的旧判据是同一个谬误**。
+- 正确推导要分快慢回路：角度环（~0.1s）收敛后 `theta -> theta_ref`；车体保持倾角时物理上必然 `v_dot = g*sin(theta - theta0) - 摩擦`（直立环无法伪造这个关系）。代入外环得慢回路方程 `v_dot = g*c*(bias - theta0) - g*c*Kv*sigma*v`，sigma 为速度测量方向与 theta 方向是否一致——**这是唯一未知量，只能用数据定**。
+- sigma=+1 时速度指数收敛，理论时间常数 `tau = 1/(g*c*Kv) = 2.34s`，与 07-06 实测推车衰减 1~3s 定量吻合；sigma=-1 时 86s 站立在数学上不可能。
+
+### 数据计算（8891 行，analyze_polarity.py 可复用）
+
+- 被控对象回归 `a = k1*theta + k2*sgn(v) + b`（n=1302，闭环无故障、|theta|<8、0.03<|v|<0.7）：
+  - `k1 = +0.0867 (m/s^2)/deg`，**符号为正 ⇒ sigma=+1，三层符号 `POLARITY/POSITION_SIGN/VELOCITY_SIGN = +1/+1/+1` 全部正确，最终定案**。
+  - 真实平衡零点 `theta0 = +2.0deg`（显示坐标）；无摩擦项交叉验证 `theta0 = +1.6deg`。
+  - 摩擦等效倾角 `theta_fric = +1.44deg`。
+- 独立验证：全数据"轮子不动、电流≈0、v≈0"的停驻段共 108s，theta 中位数 **+2.05deg**，分布 [+0.5, +3.0]，正是以 theta0 为中心的静摩擦死区。
+- 直走失败真凶 1（零点）：theta0=+2 时 `B+1` 的有效 bias = -1deg，还在摩擦死区内。数据印证：theta≈1deg 停驻 44.6s（电流 0.025A、实测加速度 +0.004m/s²，若零点真在 0 必须持续 0.17m/s² 加速，物理不可能）；116.5s 段挂着前进命令净位移 **-7.19m**（后溜）。
+- 直走失败真凶 2（高速权限天花板）：|v|>0.5 的 619 行中，电流 ≥0.34A 比例 **0%**（摔倒瞬间仅 0.21A）、轮速跟随误差仅 22rpm——内环和电流都不是瓶颈；`theta_ref` 顶 ±3deg 限幅 72%（最大减速度被钉在 g*sin3° ≈ 0.51m/s²）、`balance_ref` 顶 320rpm 30%（轮速上限 1.04m/s 吃不起非最小相位刹车瞬态）。**根本对策不是加强刹车，而是闭环限速不让速度上去。**
+- 固定 bias 无法实现爬行的解析原因：巡航速度 `v* = (bias - theta_fric - theta0误差)/Kv`，摩擦（±1.44deg）和零点漂移（±2deg）都比 bias 本身大——这就是"B0.5 不走、B1 时走时停、B2 冲"的公式解。
+
+### 修改内容
+
+| 修改项 | 旧值/旧逻辑 | 新值/新逻辑 | 原因 |
+|---|---|---|---|
+| `BALANCE_ANGLE_OFFSET_DEG` | `-2.5f` | `-0.5f` | 三重估计零点在显示 +1.6~2.0deg，欠补约 2deg |
+| `BALANCE_MODE_FORWARD/BACKWARD_BIAS_DEG` | `±1.0f` | `0.0f` | 弃用开环 bias 行走 |
+| `BALANCE_MODE_DRIVE_VELOCITY_MPS` | 无 | `0.10f` | 前进/后退改为速度闭环目标，走现有 ramp（0.10m/s²） |
+| `Chassis_ModeTargetVelocityMps()` | 恒 0 | forward/backward 返回 ±0.10 | 同上 |
+| `BALANCE_POSITION_KI_DEG_PER_M_S` | `0.0f` | `5.0f` | 行走时积分速度误差，自动收敛到克服摩擦+零点残差所需倾角 |
+| `BALANCE_POSITION_INTEGRAL_LIMIT_M_S` | `0.20f` | `0.30f` | 积分权限 = 5.0×0.30 = 1.5deg，略高于摩擦角 1.44deg |
+| 积分对象 | drive 清零 / stand 积位置误差（Ki=0 时惰性） | **drive 积速度误差 / stand 清零**；模式切换时清积分 | stand 行为完全不变（P+V 照旧），行走获得摩擦自适应 |
+| 限速守卫 | 无 | `GUARD_ON=0.40 / GUARD_OFF=0.15 m/s` 迟滞；触发时 `target_velocity=0` 并冻结积分 | 把车速摁在可回收包络内；只改外环速度目标，不触碰直立角度环任何量 |
+| VOFA I7 | `accel_theta_ref_deg`（KA=0 恒 0） | `velocity_ref_mps` | 直接观察守卫动作（超速时 v_ref 被拉 0） |
+| VOFA I15 | `runtime_speed_limit_rpm`（恒 320） | `integral_theta_ref_deg` | 观察积分收敛到的倾角 |
+
+- 语法验证通过：`gimbal_task.c / ins_task.c / chassis_serial_cmd.c`。
+
+### 下一步测试
+
+1. 烧录后先测 `stand`：静止直立 theta 均值应接近 0（验证新 offset）；轻推应照旧回中（stand 行为未改）。
+2. 发 `1`：车应以约 0.1m/s 匀速爬行。看 I7 `velocity_ref` 爬到 0.10、I6 `velocity_mps` 跟上、I15 积分角收敛到某个稳定小值（预计 0.5~1.5deg）、theta 稳定。
+3. 发 `0`：应停车站立，积分清零（I15 回 0）。
+4. 行走中人为推快：|v|>0.4 时 I7 应被守卫拉回 0，车刹到 0.15 以下后自动恢复爬行，全程 `fault=0`。
+5. 若爬行时积分顶满 1.5deg 仍不走，摩擦角比估计大，把 `INTEGRAL_LIMIT` 提到 0.40；若爬行有低频振荡，把 KI 从 5.0 降到 3.0。
+6. 零点验证：stand 长站后若 theta 均值仍有固定偏差 x，把 `BALANCE_ANGLE_OFFSET_DEG` 再加上 x（当前 -0.5 是按 theta0≈+2.0 估计的，允许 ±0.5deg 残差）。
+
+## 2026-07-07 守卫积分冻结漏洞修复：改为向 0 衰减
+
+### 问题（审查发现，未烧录先修）
+
+- 上一版守卫触发时把行走积分**冻结**。但起步顶静摩擦阶段（v=0、误差 +0.1m/s、积分速率 0.5deg/s）积分约 3s 就攒满 +1.5deg，车破摩擦窜出去触发守卫时积分正好停在最大助推值。
+- 定量：触发瞬间 v=0.4，速度项 2.5×(-0.4)=-1.0deg，冻结积分 +1.5deg，净 theta_ref=**+0.5deg 仍在向前推**；要到 v=0.6m/s 速度项才压得过积分——守卫 ON 阈值被变相从 0.40 抬到 0.6，蹭到不可回收区边缘。
+- 另一个小问题：守卫触发后 v_ref 还要走 1s 斜坡才降到 0，白送 +0.25deg 前倾。
+
+### 修改内容
+
+| 修改项 | 旧逻辑 | 新逻辑 | 原因 |
+|---|---|---|---|
+| 守卫期间积分 | 冻结（保持原值） | 以 `BALANCE_SPEED_GUARD_INTEGRAL_DECAY_M_PER_S = 0.60f` 向 0 衰减，0.5s 内清完 | 消除同向助推；衰减到 0 即停，不会积成反向，windup 保护仍成立 |
+| 守卫触发时 v_ref | 走 0.10m/s² 斜坡降到 0（需 1s） | `balance_velocity_ref_ramp_mps` 立即置 0 | 让 Kv 项立刻全额刹车 |
+
+- 语法验证通过：`gimbal_task.c / ins_task.c`。
+- 验收补充：行走中推快触发守卫时，I15 `integral_theta_ref_deg` 应在约 0.5s 内滑到 0，I7 `velocity_ref` 应立刻跳 0（不是斜坡下降）。
+
+## 2026-07-07 新固件首测：零点修好、全程无故障，但爬行是 stick-slip 极限环 → 加轮速前馈
+
+### 数据结论（4102 行，82.0s，全程 fault=0）
+
+- **零点修复验证通过**：stand 静立 60.3s，`theta` 均值 **-0.074deg**；停驻段 theta 中位数 -0.02deg。`BALANCE_ANGLE_OFFSET_DEG=-0.5f` 定案。
+- **鲁棒性显著改善**：stand 段被推到 0.97m/s 都救回来了，82s 内 0 次 fault（此前同类推速必 fault=3）。
+- **forward 段（56.0~68.9s，12.9s）暴露最后一个问题：静摩擦 stick-slip 极限环**：
+  - `v_ref` 正常爬到 0.10，积分攒到 1.40deg（50% 时间顶满 1.5deg 上限），`theta` 实际倾 +1.36deg。
+  - 但 `v` 均值仅 **0.007m/s**，净位移 0.09m，车原地抖。
+  - `v` 在 ±0.2 间振荡，周期约 1.5s，12.9s 内 17 次过零；corr(积分, v) = -0.47，积分和速度互相追逐。
+  - 机理：积分攒倾角→顶破静摩擦→车窜一下(v 到 0.25)→超过 0.1 目标,Kv 刹车+积分回退→轮子重新粘住→v 回 0→再攒。积分权限 1.5deg 与静摩擦角 1.44deg 几乎相等，永远在临界点蹭。
+- 守卫未触发（v 最大 0.25 未到 0.4），本组数据不能验证守卫。
+
+### 修改内容：行走轮速前馈
+
+| 修改项 | 逻辑 | 原因 |
+|---|---|---|
+| `drive_wheel_ff_rpm` | 行走模式把 `v_ref` 换算轮速（`v_ref * VELOCITY_SIGN / RPM_TO_MPS`，0.10m/s≈31rpm）直接加到左右轮目标 | 让轮速内环（自带积分+静摩擦前馈，S50 已验证）破静摩擦持续滚动；外环倾角只做平衡/加减速修正，不再靠攒倾角顶静摩擦 |
+| 与守卫的配合 | 守卫触发时 ramp 已被置 0，前馈随之立即消失 | 超速时前馈不会继续推车 |
+
+- 语法验证通过：`gimbal_task.c`。
+
+### 下一步测试
+
+- 烧录后发 `1`：预期 `v`（I6）平滑跟上 0.10 并保持，不再 ±0.2 振荡；`theta` 应接近 0（不再需要 1.4deg 倾角），I15 积分收敛到很小的值（只补动摩擦残差）。
+- I10 `avg_ref_rpm` 应能看到 ~31rpm 的前馈基线（平衡修正叠加在上面）。
+- 发 `0`：前馈消失，位置锁生效，应平稳停车。
+- 若爬行平稳，可把 `BALANCE_MODE_DRIVE_VELOCITY_MPS` 逐步提到 0.15/0.20 测试；若起步仍有一次小窜动，把 `BALANCE_MODE_VELOCITY_RAMP_MPS_PER_SEC` 从 0.10 降到 0.05。
+- 顺带补测守卫：行走中推快过 0.4m/s，看 I7 跳 0、I15 在 0.5s 内滑 0、刹回 0.15 后自动恢复爬行。
+
+## 2026-07-07 14:34 数据：offset 不再调，B 恢复 0，轮速前馈仍未测
+
+### 数据结论（6401 行，128s，全程 stand 模式）
+
+- 122s 连续直立无故障，净位移仅 +0.06m。
+- 用户中途发过 `B-2`（77s）和 `B-1.5`（93s）；无偏置段（70s）theta 均值 **-0.21deg**。
+- 被控对象回归 theta0 = -0.7~-0.8deg（噪声大），与上组（14:21，残差≈0）不一致 → 剩余为会话间漂移（电池/温度/地面），不是固定误差。
+- **决定：`BALANCE_ANGLE_OFFSET_DEG = -0.5f` 不再调**。残差 |0.2~0.8deg| 小于静摩擦死区 ±1.3deg，行走 KI 积分和 stand 位置环本来就自动吸收这个量级；追固定值会重蹈 yaw bias 追参的覆辙。
+- `B-2` 方向过头（把 theta 拉到 -1.8，比不加偏置离零点更远），手动 B 恢复 0。
+- **本组无 forward 段，轮速前馈（治 stick-slip 的关键改动）仍未验证**；下一步直接发 `1` 测爬行。
+
+## 2026-07-07 前馈版首测反馈"太快、倾角收不住"：降速降斜坡
+
+### 现场反馈
+
+- 轮速前馈版烧录后发 `1`，现场感受"跑太快、倾角收不住"。
+- 该次数据未导出（vofa+.csv 仍是 14:34 的 stand 数据），具体是超速还是 pitch 振荡待 CSV 确认。
+
+### 参数修改
+
+| 参数 | 旧值 | 新值 | 原因 |
+|---|---:|---:|---|
+| `BALANCE_MODE_DRIVE_VELOCITY_MPS` | `0.10f` | `0.06f` | 爬行目标降到 6cm/s，前馈基线从 ~31rpm 降到 ~18rpm |
+| `BALANCE_MODE_VELOCITY_RAMP_MPS_PER_SEC` | `0.10f` | `0.04f` | 起步斜坡放缓到 1.5s，减小前馈建立时车身的非最小相位后仰扰动 |
+
+### 下一步测试
+
+- 烧录后发 `1` 复测；**务必导出这次的 CSV**，若仍"倾角收不住"，用数据区分：
+  - v 超过 0.06 多少（速度环问题）；
+  - theta 振荡频率/幅度（角度环与前馈交互问题）；
+  - I15 积分是否在前馈存在时仍大幅摆动（KI 与前馈打架，则降 KI 5→2）。
+
+## 2026-07-07 现场确认 B-1.5 才立得住：offset 改 -2.0，发现零点会话间漂移
+
+### 现场证据与数据吻合
+
+- 现场：`offset=-0.5` 下 `B0` 立不稳，`B-1.5` 才立得住。
+- 与 14:34 数据一致：停驻分布中位数 `-0.76`、p10 `-2.22`，被控对象回归零点 `-0.7~-0.8deg`，用户当时试的 `B-2` 略过头、`B-1.5` 正好。
+
+### 参数修改
+
+| 参数 | 旧值 | 新值 | 原因 |
+|---|---:|---:|---|
+| `BALANCE_ANGLE_OFFSET_DEG` | `-0.5f` | `-2.0f` | 现场 `B-1.5` 等效固化进零点（-0.5 + -1.5 = -2.0） |
+
+### 重要发现：零点存在 ±1~1.5deg 会话间漂移
+
+- 换算到 raw 角度：上午会话真实零点 raw ≈ `-0.5deg`（当时显示 +2.0），下午会话 raw ≈ `-2.0deg`（显示 -1.5）——几小时内漂了约 `1.5deg`。
+- 疑似加速度计温漂（1deg 倾角 ≈ 17mg，BMI088 加速度计温漂可达此量级）或电池/线缆等机械变动。
+- **约定：若下次开机又漂，不要再重烧固件追常数**（与 yaw bias 追参同一教训）。两个替代方案：
+  1. 短期：开机直立后用 `B` 命令做会话级 trim；
+  2. 长期：实现 stand 模式慢速零点自学习（静止直立时 theta 均值就是真零点，用很慢的积分伺服内部 bias 跟上去）。
+
+### 下一步测试
+
+- 烧录后 `B0` 应直接立得住（等效旧 `B-1.5`）。
+- 然后继续测 `1`（爬行 0.06m/s + 轮速前馈）并导出 CSV。
+
+## 2026-07-07 14:49 数据定位"发1不动"：倾角积分与轮速前馈死锁，KI 归零
+
+### 数据结论（783 行，15.7s，全程 fault=0）
+
+- stand 段 theta 均值 `-0.011deg`：offset=-2.0 本会话完全正确。
+- forward 13.8s：**v = 0.000，轮子从未转动**。链路各环节：
+  - `v_ref` 正常爬到 0.057（斜坡工作正常）。
+  - 积分顶满 1.5deg（59% 时间），`theta_ref` 被抬到 +1.29deg。
+  - 车身实际 theta = +0.81deg，theta - theta_ref = -0.48deg。
+  - 角度环输出 35 × (-0.48) ≈ **-17rpm**，与前馈 **+17.5rpm** 精确抵消，轮子净指令 ≈ 0，静摩擦锁死。
+- 死锁机理：车不动 → 速度误差不消 → 积分抬 theta_ref → 角度环输出更负 → 恰好吃掉前馈 → 车更不动。系统收敛到"谁也不动"的静态平衡。
+- 同一矛盾在动态下就是振荡——上次"跑太快倾角收不住"（数据未导出）与此同源。
+
+### 参数修改
+
+| 参数 | 旧值 | 新值 | 原因 |
+|---|---:|---:|---|
+| `BALANCE_POSITION_KI_DEG_PER_M_S` | `5.0f` | `0.0f` | KI 是为"纯倾角顶摩擦"方案设计的；前馈架构下摩擦由轮速内环破，倾角积分与前馈死锁，数据已证明有害。平地爬行不要再打开 |
+
+### 预期行为（KI=0 后）
+
+- 发 `1`：theta_ref 只剩 Kv 项（起步约 2.5×0.06=0.15deg，随速度接近目标趋于 0）。
+- 角度环起步输出约 -5rpm，前馈 +17.5rpm，净 +12.5rpm → 轮速内环（静摩擦前馈+积分）破摩擦起转。
+- 巡航平衡点：轮子 ~18rpm、v=0.06、速度误差 0、theta_ref≈0、theta≈0，直立姿态爬行。
+- 起步瞬间车身会先轻微后仰零点几度再跟上（非最小相位，属正常）。
+
+## 2026-07-07 结构性收尾：零点自学习 + 巡航速度移入平滑滚动窗口
+
+### 判断（回应"不是顶不动摩擦就是倾角大了救不回"）
+
+- 两个正交根源，各给一个结构性解法，不再手拧参数：
+  1. **"自己立不住" = 零点会话间温漂**（raw 零点上午 -0.5deg / 下午 -2.0deg，几小时漂 1.5deg）→ 零点自学习。
+  2. **"不动或窜" = 目标速度在低速楼板以下**。楼板成分（无刷电机）：齿槽转矩（磁性静摩擦）、减速箱/轴承摩擦、驱动器电流死区、**CAN 速度反馈噪声（峰峰 13~25rpm，18rpm 目标淹没在噪声里，闭环无从谈起）**。0.06m/s(18rpm) 同时踩着摩擦楼板和反馈噪声楼板；0.20m/s(62rpm) 起步电流 0.108A 直接击穿破断力矩，反馈信噪比 3~5 倍。
+- 轮胎与地面的摩擦不是楼板（它是"滚动不打滑"的约束，是好东西）；数据里轮子从未打滑，只有"锁死不转"。
+
+### 零点自学习实现
+
+- 原理：静止直立时车实际站住的角度**就是**物理零点（力学定义）。学习不需要"站得好"，只需要"偶尔停驻"——零点错 1deg 的 14:34 数据里停驻时刻累计 79s，样本充足；正向棘轮（每次停驻拉近零点→站得更省力→停驻更多）。
+- 实现（`gimbal_task.c`，约 15 行）：`theta_deg -= balance_zero_trim_deg`；门控满足时 `trim += 0.02 * theta * dt`（时间常数 50s，与直立环 ~1s 解耦），限幅 ±2deg，整个会话保留、不随 fault 清零，掉电回到 `BALANCE_ANGLE_OFFSET_DEG` 基准。
+- 门控（全部满足才学习）：stand 模式、|theta|<3deg、|theta_rate|<10dps、|v|<0.03m/s、左右轮 |rpm|<5。被推/行走/摔倒全冻结；若零点错到永远无法停驻（±2deg 外），学习保持冻结，安全失效。
+
+### 参数修改
+
+| 参数 | 旧值 | 新值 | 原因 |
+|---|---:|---:|---|
+| `BALANCE_MODE_DRIVE_VELOCITY_MPS` | `0.06f` | `0.20f` | 移入平滑滚动窗口 [0.15, 0.35] 中间；守卫 0.40 封顶 |
+| `BALANCE_MODE_VELOCITY_RAMP_MPS_PER_SEC` | `0.04f` | `0.08f` | 2.5s 到巡航；过慢的斜坡会让起步长时间停留在楼板区 |
+| `BALANCE_ZERO_TRIM_*` | 无 | ENABLE=1, RATE=0.02, LIMIT=2.0, 门控 V=0.03/RATE=10/THETA=3/WHEEL=5 | 零点自学习 |
+| VOFA I15 | `integral_theta_ref_deg`（KI=0 后恒 0） | `zero_trim_deg` | 观察自学习收敛 |
+
+- 语法验证通过：`gimbal_task.c / ins_task.c / chassis_serial_cmd.c`。
+
+### 下一步测试
+
+1. 烧录后 KEY 解锁站立 1~2 分钟：看 I15 `zero_trim_deg` 从 0 缓慢滑向某个稳定值（量级 ±0.5deg 内），同时 I0 `theta` 均值趋向 0，车踱步减少。
+2. 发 `1`：v_ref 2.5s 斜坡到 0.20，预期 v 平滑跟随、theta 接近 0 直立姿态巡航、不再"不动或窜"。
+3. 发 `0`：平稳停车。
+4. 行走中推快过 0.4：守卫拉 v_ref 到 0，刹回 0.15 后自动恢复。
+5. 全程导出 CSV。
+
+## 2026-07-07 15:23 数据：站立/守卫成熟，前馈抵消死锁第二形态（车身后仰替代积分）
+
+### 数据结论（4177 行，83.5s，全程 fault=0）
+
+- 站立成熟：stand 29.6s theta 均值 +0.088deg；零点自学习只学 0.01deg（本会话零点本就准确）。
+- **守卫实战验证通过**：63.9s 车被冲到 1.02m/s、theta +5deg、轮子 309rpm 全力追，守卫按住 v_ref=0 后救回，无 fault。历史最大速度偏移且未摔倒。
+- **forward 不走，死锁第二形态**（26.9s 准静止段数字自洽）：
+  - 车身后仰停在 theta=-1.20deg，theta_ref=+0.46deg（纯 Kv 项）。
+  - 角度环输出 35×(-1.66)=-58rpm，前馈 +56rpm，净 -2rpm（实测 avg_ref=-2rpm、轮子 -0.8rpm），落在静摩擦死区。
+  - KI 时代由积分抬 theta_ref 提供抵消，KI=0 后由**车身自己后仰**提供抵消——同一个不动点，换了吸收变量。
+
+### 机理定性（本质）
+
+- 角度环单一输出承担两件事（纠正 theta + 消化前馈）不可兼得：扶正后仰车身需要轮子向后滚，前馈持续 +56rpm，两者互相抵消；净指令 ±2rpm 在静摩擦死区内，**死锁点被静摩擦稳定**。
+- "直立巡航 0.2m/s（theta≈0、轮 62rpm）"是合法平衡点，但从静止出发到不了——中间隔着死锁坑。
+- 教程车前馈加在力矩/PWM 级不会被角度环抵消；我们的前馈加在轮速指令级，与角度环输出同级必然打架。**轮速级速度前馈 + 角度环输出轮速指令的组合存在结构性冲突。**
+
+### 候选修法（未实施，待选）
+
+| 方案 | 思路 | 评价 |
+|---|---|---|
+| A. 速度解耦 | 轮速指令 = 实测车速换算轮速 + 角度环输出；角度环只管"轮子相对车身"修正，速度调节全交 Kv→theta_ref | 轮速伺服拓扑标准写法，根治；实现前需推一遍 v 正反馈路径稳定性 |
+| B. 起步踢脚 | 进 forward 时 0.3~0.5s 反向轮速脉冲把车身甩前倾，跳过死锁坑 | 最小改动，补丁不根治 |
+| C. 回纯串级（去前馈） | theta_ref 驱动 | 轮速伺服下巡航需 62/35=1.77deg 恒定角差，速度由摩擦角决定，控不准，不推荐 |
+
+## 2026-07-07 急停/故障后强制回 stand
+
+### 漏洞修复
+
+- 原逻辑在 KEY 急停、角度/角速度保护、反馈/使能故障时只切急停输出，没有把 `chassis_mode` 退回 `CHASSIS_MODE_STAND`。
+- 风险：若车在 `forward/backward` 中触发急停或故障，扶正后再次按 KEY 解锁会沿用旧行走模式，可能直接继续前进/后退，而不是先站住。
+
+### 修改内容
+
+| 修改项 | 旧逻辑 | 新逻辑 |
+|---|---|---|
+| KEY 运行中按下 | `emergency_stop = 1` | 先 `Chassis_SetControlMode(CHASSIS_MODE_STAND)`，再急停 |
+| 角度/角速度保护 | 只急停并 reset PID | 先强制回 stand，再急停并 reset PID |
+| 电机反馈/使能故障 | 只急停 | 先强制回 stand，再急停 |
+
+### 验证
+
+- `Application/gimbal/gimbal_task.c` 已通过 `arm-none-eabi-gcc -fsyntax-only`。
+- 下一次测试：在 `1` 前进中按 KEY 急停，再按 KEY 解锁，I14 应先保持 `0`，不会自动恢复 `1`。

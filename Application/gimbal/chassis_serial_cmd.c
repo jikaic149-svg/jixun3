@@ -165,9 +165,15 @@ static uint8_t cmd_mode_from_word(const uint8_t *line,
         *mode = CHASSIS_MODE_FORWARD;
         return 1U;
     }
+    if ((cmd_match_word(line, len, start, "backward") != 0U) ||
+        (cmd_match_word(line, len, start, "back") != 0U) ||
+        (cmd_match_word(line, len, start, "reverse") != 0U)) {
+        *mode = CHASSIS_MODE_BACKWARD;
+        return 1U;
+    }
     if ((cmd_match_word(line, len, start, "stop") != 0U) ||
         (cmd_match_word(line, len, start, "park") != 0U)) {
-        *mode = CHASSIS_MODE_STOP;
+        *mode = CHASSIS_MODE_STAND;
         return 1U;
     }
     if (cmd_match_word(line, len, start, "left") != 0U) {
@@ -200,6 +206,12 @@ static uint8_t cmd_parse_mode(const uint8_t *line,
     }
 
     if (cmd_mode_from_word(line, len, i, mode) != 0U) {
+        return 1U;
+    }
+
+    if ((cmd_mode_from_digit(line[i], mode) != 0U) &&
+        (((uint8_t)(i + 1U) >= len) ||
+         (cmd_is_delimiter(line[i + 1U]) != 0U))) {
         return 1U;
     }
 

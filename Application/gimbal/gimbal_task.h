@@ -22,7 +22,7 @@ typedef enum {
 typedef enum {
     CHASSIS_MODE_STAND = 0,
     CHASSIS_MODE_FORWARD,
-    CHASSIS_MODE_STOP,
+    CHASSIS_MODE_BACKWARD,
     CHASSIS_MODE_TURN_LEFT,
     CHASSIS_MODE_TURN_RIGHT
 } ChassisMode_e;
@@ -71,6 +71,8 @@ extern volatile float balance_pid_accel_mps2;
 extern volatile float balance_pid_accel_theta_ref_deg;
 extern volatile float balance_pid_wheel_diff_mps;
 extern volatile float balance_pid_speed_theta_ref_deg;
+extern volatile float balance_pid_integral_theta_ref_deg;
+extern volatile float balance_pid_zero_trim_deg;
 extern volatile float balance_pid_angle_speed_ref_rpm;
 extern volatile float balance_pid_rate_speed_ref_rpm;
 extern volatile float balance_pid_balance_speed_ref_rpm;

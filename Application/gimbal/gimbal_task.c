@@ -51,6 +51,8 @@ volatile float balance_pid_accel_mps2 = 0.0f;
 volatile float balance_pid_accel_theta_ref_deg = 0.0f;
 volatile float balance_pid_wheel_diff_mps = 0.0f;
 volatile float balance_pid_speed_theta_ref_deg = 0.0f;
+volatile float balance_pid_integral_theta_ref_deg = 0.0f;
+volatile float balance_pid_zero_trim_deg = 0.0f;
 volatile float balance_pid_angle_speed_ref_rpm = 0.0f;
 volatile float balance_pid_rate_speed_ref_rpm = 0.0f;
 volatile float balance_pid_balance_speed_ref_rpm = 0.0f;
@@ -113,6 +115,10 @@ static float balance_last_measured_velocity_mps = 0.0f;
 static float balance_accel_lpf_mps2 = 0.0f;
 static uint8_t balance_accel_lpf_ready = 0U;
 static float balance_speed_integral_m = 0.0f;
+static uint8_t balance_speed_guard_active = 0U;
+static ChassisMode_e balance_integral_last_mode = CHASSIS_MODE_STAND;
+/* 零点自学习 trim:整个会话保留,不随 fault/重新解锁清零 */
+static float balance_zero_trim_deg = 0.0f;
 
 static float Chassis_AbsF(float value)
 {
@@ -307,7 +313,9 @@ void Balance_SetPidRuntimeParam(BalancePidRuntimeParam_e param, float value)
         break;
     case BALANCE_PID_RUNTIME_SPEED_LIMIT_RPM:
         balance_pid_runtime_speed_limit_rpm =
-            Chassis_ClampF(Chassis_AbsF(value), 20.0f, 500.0f);
+            Chassis_ClampF(Chassis_AbsF(value),
+                           BALANCE_PID_RUNTIME_SPEED_LIMIT_MIN_RPM,
+                           500.0f);
         break;
     case BALANCE_PID_RUNTIME_CURRENT_LIMIT_A:
         balance_pid_runtime_current_limit_a =
@@ -330,6 +338,8 @@ void Chassis_SetControlMode(ChassisMode_e mode)
     if (mode > CHASSIS_MODE_TURN_RIGHT) {
         mode = CHASSIS_MODE_STAND;
     }
+
+    Balance_SetManualBiasDeg(0.0f);
 
     if (chassis_mode != mode) {
         chassis_mode = mode;
@@ -357,6 +367,7 @@ static void Chassis_UpdateKey(void)
 
         if (key_stable_state == 0U) {
             if (emergency_stop == 0U) {
+                Chassis_SetControlMode(CHASSIS_MODE_STAND);
                 chassis_speed_test_armed = 0U;
                 emergency_stop = 1U;
             } else if ((chassis_motor_feedback_ok != 0U) &&
@@ -510,13 +521,14 @@ static void Chassis_ResetBalancePid(void)
     ChassisPid_Reset(&balance_angle_pid);
     balance_position_m = 0.0f;
     balance_position_ref_m = 0.0f;
+    balance_speed_integral_m = 0.0f;
+    balance_speed_guard_active = 0U;
     balance_velocity_lpf_mps = 0.0f;
     balance_velocity_lpf_ready = 0U;
     balance_velocity_ref_ramp_mps = 0.0f;
     balance_last_measured_velocity_mps = 0.0f;
     balance_accel_lpf_mps2 = 0.0f;
     balance_accel_lpf_ready = 0U;
-    balance_speed_integral_m = 0.0f;
     balance_zero_bias_frozen = 0U;
     balance_pid_theta_deg = global_balance_angle;
     balance_pid_theta_ref_deg = 0.0f;
@@ -531,6 +543,7 @@ static void Chassis_ResetBalancePid(void)
     balance_pid_accel_theta_ref_deg = 0.0f;
     balance_pid_wheel_diff_mps = 0.0f;
     balance_pid_speed_theta_ref_deg = 0.0f;
+    balance_pid_integral_theta_ref_deg = 0.0f;
     balance_pid_angle_speed_ref_rpm = 0.0f;
     balance_pid_rate_speed_ref_rpm = 0.0f;
     balance_pid_balance_speed_ref_rpm = 0.0f;
@@ -599,6 +612,7 @@ static void Chassis_UpdateBalanceViewZeroOutput(void)
     balance_pid_accel_theta_ref_deg = 0.0f;
     balance_pid_wheel_diff_mps = wheel_diff_mps;
     balance_pid_speed_theta_ref_deg = 0.0f;
+    balance_pid_integral_theta_ref_deg = 0.0f;
     balance_pid_angle_speed_ref_rpm = 0.0f;
     balance_pid_rate_speed_ref_rpm = 0.0f;
     balance_pid_balance_speed_ref_rpm = 0.0f;
@@ -770,11 +784,23 @@ static void Chassis_CalcSpeedTestOutput(float *left_current, float *right_curren
 static float Chassis_ModeTargetVelocityMps(ChassisMode_e mode)
 {
     if (mode == CHASSIS_MODE_FORWARD) {
-        return Chassis_LimitAbs(BALANCE_MODE_FORWARD_VELOCITY_MPS,
-                                BALANCE_MODE_FORWARD_VELOCITY_LIMIT_MPS);
+        return BALANCE_MODE_DRIVE_VELOCITY_MPS;
     }
-
+    if (mode == CHASSIS_MODE_BACKWARD) {
+        return -BALANCE_MODE_DRIVE_VELOCITY_MPS;
+    }
     return 0.0f;
+}
+
+static float Chassis_ModeTargetBiasDeg(ChassisMode_e mode)
+{
+    if (mode == CHASSIS_MODE_FORWARD) {
+        return BALANCE_MODE_FORWARD_BIAS_DEG;
+    }
+    if (mode == CHASSIS_MODE_BACKWARD) {
+        return BALANCE_MODE_BACKWARD_BIAS_DEG;
+    }
+    return BALANCE_MODE_STAND_BIAS_DEG;
 }
 
 static float Chassis_ModeTurnSpeedRpm(ChassisMode_e mode)
@@ -811,12 +837,15 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
     float accel_theta_ref_deg;
     float position_error_m;
     float speed_theta_ref_deg;
+    float mode_bias_deg;
+    float drive_wheel_ff_rpm;
     float balance_speed_ref_rpm;
     float turn_speed_ref_rpm;
     float left_ref_rpm;
     float right_ref_rpm;
     float left_out;
     float right_out;
+    uint8_t drive_bias_mode;
 
     if (chassis_motor_state != CHASSIS_MOTOR_BALANCE_PID) {
         Chassis_ResetBalancePid();
@@ -829,11 +858,15 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
     Chassis_BalancePidInitOnce();
 
     theta_deg = Chassis_GetBalanceAngleDeg();
+#if BALANCE_ZERO_TRIM_ENABLE
+    theta_deg -= balance_zero_trim_deg;
+#endif
     accel_angle_deg = global_balance_accel_angle;
     theta_rate_dps = global_balance_rate;
 
     if (Chassis_AbsF(theta_deg) > BALANCE_PID_SAFE_ANGLE_DEG) {
         chassis_fault_code = CHASSIS_FAULT_PID_ANGLE;
+        Chassis_SetControlMode(CHASSIS_MODE_STAND);
         chassis_speed_test_armed = 0U;
         emergency_stop = 1U;
         Chassis_ResetBalancePid();
@@ -845,6 +878,7 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
 
     if (Chassis_AbsF(theta_rate_dps) > BALANCE_PID_SAFE_RATE_DPS) {
         chassis_fault_code = CHASSIS_FAULT_PID_RATE;
+        Chassis_SetControlMode(CHASSIS_MODE_STAND);
         chassis_speed_test_armed = 0U;
         emergency_stop = 1U;
         Chassis_ResetBalancePid();
@@ -892,14 +926,60 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
     }
     balance_last_measured_velocity_mps = measured_velocity_mps;
 
+#if BALANCE_ZERO_TRIM_ENABLE
+    /*
+     * 零点自学习:静止直立时 theta 均值就是真实零点。
+     * 门控确保只在"stand + 车不动 + 轮不转 + 姿态安静"时学习,
+     * 时间常数 1/0.02 = 50s,与直立环(~1s)动力学解耦。
+     */
+    if ((chassis_mode == CHASSIS_MODE_STAND) &&
+        (Chassis_AbsF(theta_deg) < BALANCE_ZERO_TRIM_GATE_THETA_DEG) &&
+        (Chassis_AbsF(theta_rate_dps) < BALANCE_ZERO_TRIM_GATE_RATE_DPS) &&
+        (Chassis_AbsF(measured_velocity_mps) < BALANCE_ZERO_TRIM_GATE_V_MPS) &&
+        (Chassis_AbsF(left_rpm) < BALANCE_ZERO_TRIM_GATE_WHEEL_RPM) &&
+        (Chassis_AbsF(right_rpm) < BALANCE_ZERO_TRIM_GATE_WHEEL_RPM)) {
+        balance_zero_trim_deg += BALANCE_ZERO_TRIM_RATE_PER_SEC *
+                                 theta_deg * BALANCE_PID_DT_SEC;
+        balance_zero_trim_deg =
+            Chassis_LimitAbs(balance_zero_trim_deg,
+                             BALANCE_ZERO_TRIM_LIMIT_DEG);
+    }
+#endif
+
     target_velocity_mps = Chassis_ModeTargetVelocityMps(chassis_mode);
+    mode_bias_deg = Chassis_ModeTargetBiasDeg(chassis_mode);
+    drive_bias_mode = ((chassis_mode == CHASSIS_MODE_FORWARD) ||
+                       (chassis_mode == CHASSIS_MODE_BACKWARD)) ? 1U : 0U;
+    if (chassis_mode != balance_integral_last_mode) {
+        balance_speed_integral_m = 0.0f;
+        balance_integral_last_mode = chassis_mode;
+    }
+    /*
+     * 闭环限速守卫(带迟滞):超速时撤销行走速度目标,让外环全部权限
+     * 用于刹车。只改 target_velocity_mps,不触碰直立角度环。
+     */
+    if (Chassis_AbsF(measured_velocity_mps) > BALANCE_SPEED_GUARD_ON_MPS) {
+        balance_speed_guard_active = 1U;
+    } else if (Chassis_AbsF(measured_velocity_mps) <
+               BALANCE_SPEED_GUARD_OFF_MPS) {
+        balance_speed_guard_active = 0U;
+    }
+    if (balance_speed_guard_active != 0U) {
+        target_velocity_mps = 0.0f;
+        /* 不等斜坡,立刻撤销速度目标,让 Kv 项全额刹车 */
+        balance_velocity_ref_ramp_mps = 0.0f;
+    }
     balance_velocity_ref_ramp_mps =
         Chassis_StepTowards(balance_velocity_ref_ramp_mps,
                             target_velocity_mps,
                             BALANCE_MODE_VELOCITY_RAMP_MPS_PER_SEC *
                             BALANCE_PID_DT_SEC);
-    balance_position_ref_m += balance_velocity_ref_ramp_mps *
-                              BALANCE_PID_DT_SEC;
+    if (drive_bias_mode != 0U) {
+        balance_position_ref_m = measured_position_m;
+    } else {
+        balance_position_ref_m += balance_velocity_ref_ramp_mps *
+                                  BALANCE_PID_DT_SEC;
+    }
     balance_position_ref_m = Chassis_LimitAbs(balance_position_ref_m,
                                               BALANCE_PID_POSITION_LIMIT_M);
 
@@ -908,11 +988,35 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
         speed_error_mps = 0.0f;
     }
     position_error_m = balance_position_ref_m - measured_position_m;
+    if (drive_bias_mode != 0U) {
+        position_error_m = 0.0f;
+    }
     accel_error_mps2 = 0.0f - balance_accel_lpf_mps2;
     accel_theta_ref_deg = BALANCE_POSITION_KA_DEG_PER_MPS2 *
                           accel_error_mps2;
 
-    balance_speed_integral_m += position_error_m * BALANCE_PID_DT_SEC;
+    /*
+     * 速度积分只在行走模式工作,积分对象是速度误差(单位 m),
+     * 收敛到维持目标速度所需倾角(克服静摩擦与残余零点误差)。
+     * 守卫激活期间积分向 0 衰减而不是冻结:起步顶静摩擦时积分可能
+     * 已攒满 +1.5deg,冻结会在超速时继续同向助推(v=0.4 时速度项
+     * -1.0deg 压不过它);衰减 0.5s 内清完,之后刹车全额生效,
+     * 且衰减到 0 即停,不会积成反向,windup 保护仍成立。
+     * stand 模式不积分,保持原 P+V 行为不变。
+     */
+    if (drive_bias_mode != 0U) {
+        if (balance_speed_guard_active == 0U) {
+            balance_speed_integral_m += speed_error_mps * BALANCE_PID_DT_SEC;
+        } else {
+            balance_speed_integral_m = Chassis_StepTowards(
+                balance_speed_integral_m,
+                0.0f,
+                BALANCE_SPEED_GUARD_INTEGRAL_DECAY_M_PER_S *
+                BALANCE_PID_DT_SEC);
+        }
+    } else {
+        balance_speed_integral_m = 0.0f;
+    }
     balance_speed_integral_m =
         Chassis_LimitAbs(balance_speed_integral_m,
                          BALANCE_POSITION_INTEGRAL_LIMIT_M_S);
@@ -924,7 +1028,8 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
     speed_theta_ref_deg = Chassis_LimitAbs(speed_theta_ref_deg,
                                            BALANCE_PID_THETA_REF_LIMIT_DEG);
 
-    theta_ref_deg = balance_manual_bias_deg + speed_theta_ref_deg;
+    theta_ref_deg = balance_manual_bias_deg + mode_bias_deg +
+                    speed_theta_ref_deg;
     theta_ref_deg = Chassis_LimitAbs(theta_ref_deg,
                                      BALANCE_PID_THETA_REF_LIMIT_DEG);
     theta_error_deg = theta_deg - theta_ref_deg;
@@ -940,9 +1045,23 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
     turn_speed_ref_rpm = Chassis_ModeTurnSpeedRpm(chassis_mode);
     turn_speed_ref_rpm = Chassis_LimitAbs(turn_speed_ref_rpm,
                                           balance_pid_runtime_speed_limit_rpm);
-    left_ref_rpm = balance_speed_ref_rpm +
+    /*
+     * 行走速度前馈:把 v_ref 直接换算成轮速(0.10m/s≈31rpm)加到左右轮
+     * 目标上,由轮速内环(自带积分+静摩擦前馈)破静摩擦持续滚动;
+     * 外环倾角只做平衡/加减速修正,不再靠攒倾角顶静摩擦。
+     * 依据:纯倾角方案实测为 1.5s 周期 stick-slip 极限环(积分顶满
+     * 1.5deg、theta 倾 1.36deg 车仍原地抖,v 均值仅 0.007m/s)。
+     * 守卫触发时 ramp 已被置 0,前馈随之立即消失。
+     */
+    drive_wheel_ff_rpm = 0.0f;
+    if (drive_bias_mode != 0U) {
+        drive_wheel_ff_rpm = BALANCE_PID_VELOCITY_SIGN *
+                             balance_velocity_ref_ramp_mps /
+                             BALANCE_RPM_TO_MPS;
+    }
+    left_ref_rpm = balance_speed_ref_rpm + drive_wheel_ff_rpm +
                    BALANCE_PID_LEFT_YAW_SIGN * turn_speed_ref_rpm;
-    right_ref_rpm = balance_speed_ref_rpm +
+    right_ref_rpm = balance_speed_ref_rpm + drive_wheel_ff_rpm +
                     BALANCE_PID_RIGHT_YAW_SIGN * turn_speed_ref_rpm;
     left_ref_rpm = Chassis_LimitAbs(left_ref_rpm,
                                     balance_pid_runtime_speed_limit_rpm);
@@ -979,6 +1098,9 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
     balance_pid_accel_theta_ref_deg = accel_theta_ref_deg;
     balance_pid_wheel_diff_mps = wheel_diff_mps;
     balance_pid_speed_theta_ref_deg = speed_theta_ref_deg;
+    balance_pid_integral_theta_ref_deg =
+        BALANCE_POSITION_KI_DEG_PER_M_S * balance_speed_integral_m;
+    balance_pid_zero_trim_deg = balance_zero_trim_deg;
     balance_pid_angle_speed_ref_rpm =
         BALANCE_PID_POLARITY *
         balance_pid_runtime_kp * theta_error_deg;
@@ -1063,6 +1185,7 @@ void Gimbal_Task(void *argument)
             chassis_fault_code = (chassis_motor_feedback_ok == 0U) ?
                                  CHASSIS_FAULT_FEEDBACK :
                                  CHASSIS_FAULT_ENABLE;
+            Chassis_SetControlMode(CHASSIS_MODE_STAND);
             chassis_speed_test_armed = 0U;
             emergency_stop = 1U;
         }
