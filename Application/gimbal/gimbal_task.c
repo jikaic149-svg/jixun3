@@ -119,6 +119,7 @@ static uint8_t balance_speed_guard_active = 0U;
 static ChassisMode_e balance_integral_last_mode = CHASSIS_MODE_STAND;
 static float balance_drive_launch_timer_sec = 0.0f;
 static float balance_stop_brake_timer_sec = 0.0f;
+static float balance_stop_brake_lowv_timer_sec = 0.0f;
 static float balance_drive_pulse_timer_sec = 0.0f;
 static float balance_drive_pulse_brake_timer_sec = 0.0f;
 static float balance_drive_pulse_hold_timer_sec = 0.0f;
@@ -530,6 +531,7 @@ static void Chassis_ResetBalancePid(void)
     balance_speed_guard_active = 0U;
     balance_drive_launch_timer_sec = 0.0f;
     balance_stop_brake_timer_sec = 0.0f;
+    balance_stop_brake_lowv_timer_sec = 0.0f;
     balance_drive_pulse_timer_sec = 0.0f;
     balance_drive_pulse_brake_timer_sec = 0.0f;
     balance_drive_pulse_hold_timer_sec = 0.0f;
@@ -573,6 +575,7 @@ static void Chassis_ResetModeIntegrator(void)
     balance_speed_integral_m = 0.0f;
     balance_drive_launch_timer_sec = 0.0f;
     balance_stop_brake_timer_sec = 0.0f;
+    balance_stop_brake_lowv_timer_sec = 0.0f;
     balance_drive_pulse_timer_sec = 0.0f;
     balance_drive_pulse_brake_timer_sec = 0.0f;
     balance_drive_pulse_hold_timer_sec = 0.0f;
@@ -1017,6 +1020,7 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
             } else {
                 balance_stop_brake_timer_sec = 0.0f;
             }
+            balance_stop_brake_lowv_timer_sec = 0.0f;
 #else
             balance_stop_brake_timer_sec = 0.0f;
 #endif
@@ -1047,6 +1051,40 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
             Chassis_StepTowards(balance_drive_launch_timer_sec,
                                 0.0f,
                                 BALANCE_PID_DT_SEC);
+        /*
+         * 破摩擦成功(速度已进平滑滚动窗口)立即结束 launch,
+         * 防止 tref=+1.4deg 继续把车加速到守卫线。
+         */
+        if (((mode_target_velocity_mps >= 0.0f) &&
+             (measured_velocity_mps >= BALANCE_MODE_LAUNCH_EXIT_MPS)) ||
+            ((mode_target_velocity_mps < 0.0f) &&
+             (measured_velocity_mps <= -BALANCE_MODE_LAUNCH_EXIT_MPS))) {
+            balance_drive_launch_timer_sec = 0.0f;
+        }
+        /*
+         * launch 结束的这一拍,车已被甩到 ~0.15m/s 滚动;斜坡若从 0
+         * 重爬(0.08/s 需 2s),Kv 项会先把车刹回静摩擦死区。
+         * 用当前实测速度做斜坡起点(限幅在 0~巡航目标之间),接力续滚。
+         */
+        if (balance_drive_launch_timer_sec <= 0.0f) {
+            float ramp_seed_mps = measured_velocity_mps;
+            if (mode_target_velocity_mps >= 0.0f) {
+                if (ramp_seed_mps < 0.0f) {
+                    ramp_seed_mps = 0.0f;
+                }
+                if (ramp_seed_mps > mode_target_velocity_mps) {
+                    ramp_seed_mps = mode_target_velocity_mps;
+                }
+            } else {
+                if (ramp_seed_mps > 0.0f) {
+                    ramp_seed_mps = 0.0f;
+                }
+                if (ramp_seed_mps < mode_target_velocity_mps) {
+                    ramp_seed_mps = mode_target_velocity_mps;
+                }
+            }
+            balance_velocity_ref_ramp_mps = ramp_seed_mps;
+        }
     }
     drive_pulse_brake_active = 0U;
     drive_pulse_hold_active = 0U;
@@ -1116,23 +1154,40 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
     (void)drive_pulse_brake_active;
     (void)drive_pulse_hold_active;
 #endif
-    stop_brake_active =
-        ((((chassis_mode == CHASSIS_MODE_STAND) &&
-           (balance_stop_brake_timer_sec > 0.0f) &&
-           (Chassis_AbsF(measured_velocity_mps) >
-            BALANCE_MODE_STOP_BRAKE_OFF_MPS)) ||
-          (drive_pulse_brake_active != 0U)) ? 1U : 0U);
-    if ((stop_brake_active != 0U) &&
-        (Chassis_AbsF(theta_deg) > BALANCE_MODE_BRAKE_RECOVER_ANGLE_DEG)) {
-        stop_brake_active = 0U;
-    }
-    if (stop_brake_active != 0U) {
+    /*
+     * 20:02 数据:速度信号噪声带 ±0.03,旧逻辑"任一拍 |v|<=0.02 就把
+     * timer 清零"使 0.8s 刹车窗口在切换后 1~2 拍内整个作废(两次停车
+     * aref-bref 恒为 0,刹车从未生效)。改为:timer 在 stand 下无条件
+     * 递减走完;只有连续低速超过 LOWV_EXIT_SEC 才提前结束窗口;
+     * 超角度保护只暂停本拍输出,不摧毁窗口。
+     */
+    stop_brake_active = 0U;
+    if ((chassis_mode == CHASSIS_MODE_STAND) &&
+        (balance_stop_brake_timer_sec > 0.0f)) {
         balance_stop_brake_timer_sec =
             Chassis_StepTowards(balance_stop_brake_timer_sec,
                                 0.0f,
                                 BALANCE_PID_DT_SEC);
-    } else if (chassis_mode == CHASSIS_MODE_STAND) {
-        balance_stop_brake_timer_sec = 0.0f;
+        if (Chassis_AbsF(measured_velocity_mps) <=
+            BALANCE_MODE_STOP_BRAKE_OFF_MPS) {
+            balance_stop_brake_lowv_timer_sec += BALANCE_PID_DT_SEC;
+            if (balance_stop_brake_lowv_timer_sec >=
+                BALANCE_MODE_STOP_BRAKE_LOWV_EXIT_SEC) {
+                balance_stop_brake_timer_sec = 0.0f;
+            }
+        } else {
+            balance_stop_brake_lowv_timer_sec = 0.0f;
+        }
+        if (balance_stop_brake_timer_sec > 0.0f) {
+            stop_brake_active = 1U;
+        }
+    }
+    if (drive_pulse_brake_active != 0U) {
+        stop_brake_active = 1U;
+    }
+    if ((stop_brake_active != 0U) &&
+        (Chassis_AbsF(theta_deg) > BALANCE_MODE_BRAKE_RECOVER_ANGLE_DEG)) {
+        stop_brake_active = 0U;
     }
     balance_velocity_ref_ramp_mps =
         Chassis_StepTowards(balance_velocity_ref_ramp_mps,
@@ -1189,6 +1244,11 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
     balance_speed_integral_m =
         Chassis_LimitAbs(balance_speed_integral_m,
                          BALANCE_POSITION_INTEGRAL_LIMIT_M_S);
+#if !BALANCE_MODE_DRIVE_THETA_REF_ENABLE
+    if (drive_bias_mode != 0U) {
+        balance_speed_integral_m = 0.0f;
+    }
+#endif
     speed_theta_ref_deg =
         BALANCE_POSITION_KP_DEG_PER_M * position_error_m +
         BALANCE_POSITION_KV_DEG_PER_MPS * speed_error_mps +
@@ -1196,12 +1256,33 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
         BALANCE_POSITION_KI_DEG_PER_M_S * balance_speed_integral_m;
     speed_theta_ref_deg = Chassis_LimitAbs(speed_theta_ref_deg,
                                            BALANCE_PID_THETA_REF_LIMIT_DEG);
+#if !BALANCE_MODE_DRIVE_THETA_REF_ENABLE
+    if (drive_bias_mode != 0U) {
+        speed_theta_ref_deg = 0.0f;
+    }
+#endif
     if (drive_launch_active != 0U) {
         launch_bias_deg = (mode_target_velocity_mps >= 0.0f) ?
                           BALANCE_MODE_LAUNCH_BIAS_DEG :
                           -BALANCE_MODE_LAUNCH_BIAS_DEG;
         speed_theta_ref_deg = launch_bias_deg;
     }
+#if BALANCE_MODE_STOP_BRAKE_ENABLE
+    /*
+     * 姿态域刹车:倒立摆减速的唯一物理路径是先把车身转到平衡点后方,
+     * 轮级反转指令只会把车身推得更前倾(16:36 "越刹越快")。刹车窗口内
+     * 在 Kv 之外叠加与速度成正比的后仰目标,让车身 0.3~0.4s 转过去,
+     * 而不是靠巡航 Kv 权限慢慢蹭 2s(20:02 实测冲出 0.14~0.16m)。
+     */
+    if (stop_brake_active != 0U) {
+        float brake_theta_deg = -BALANCE_MODE_STOP_BRAKE_KV_DEG_PER_MPS *
+                                measured_velocity_mps;
+        brake_theta_deg =
+            Chassis_LimitAbs(brake_theta_deg,
+                             BALANCE_MODE_STOP_BRAKE_TREF_LIMIT_DEG);
+        speed_theta_ref_deg += brake_theta_deg;
+    }
+#endif
 
     theta_ref_deg = balance_manual_bias_deg + mode_bias_deg +
                     speed_theta_ref_deg;
@@ -1233,9 +1314,9 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
      * 守卫触发时 ramp 已被置 0,前馈随之立即消失。
     */
     /*
-     * Current drive structure: v_ref only shapes theta_ref. The speed
-     * controller base follows measured wheel speed, so balance correction
-     * cannot be cancelled by a fixed target-speed feedforward at standstill.
+     * Current crawl structure: drive mode can keep theta_ref neutral while
+     * the speed controller base follows measured wheel speed plus a small
+     * crawl offset.
      */
     drive_base_rpm = 0.0f;
     if ((drive_bias_mode != 0U) &&

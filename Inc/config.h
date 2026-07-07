@@ -154,7 +154,12 @@
 #define BALANCE_PID_ANGLE_KI_RPM_PER_DEG_S  0.0f
 #define BALANCE_PID_RATE_KD_RPM_PER_DPS     0.400f
 #define BALANCE_POSITION_KP_DEG_PER_M       0.80f
-#define BALANCE_POSITION_KV_DEG_PER_MPS     2.50f
+/*
+ * 20:02 数据:巡航段 v 在 ±0.1 打摆(粘滑极限环),Kv=2.5 的 DC 权限
+ * 2.5*0.2=0.5deg 顶不进 1.4deg 摩擦带,按 19:44 预案翻倍到 5.0
+ * (0.2m/s 误差给 1.0deg;滚动中维持只需 0.2~0.4deg,余量用于破粘滞)。
+ */
+#define BALANCE_POSITION_KV_DEG_PER_MPS     5.00f
 #define BALANCE_POSITION_KA_DEG_PER_MPS2    0.0f
 /*
  * 行走速度积分:已停用(=0)。14:49 数据证明它与轮速前馈死锁:
@@ -173,35 +178,66 @@
  * 摩擦(±1.4deg)和零点漂移都比 bias 本身大,只能"不走或冲")。
  * 改为速度闭环目标 ±BALANCE_MODE_DRIVE_VELOCITY_MPS,倾角由外环自己算。
  */
-#define BALANCE_MODE_STAND_BIAS_DEG         0.0f
-#define BALANCE_MODE_FORWARD_BIAS_DEG       0.0f
-#define BALANCE_MODE_BACKWARD_BIAS_DEG      0.0f
+/*
+ * 19:24 数据:平衡点不是一个点而是一条静摩擦带——车身停在 -0.4deg
+ * (tref 追上)时 bref 仅 +0.7rpm,重力被静摩擦整个吃掉,任何小于
+ * 分离角(~1.4deg)的固定前倾都只会"靠在摩擦上站着"。
+ * 走路方案回到 16:14 验证过的组合:LAUNCH 甩出摩擦坑(theta 到
+ * +2.37deg、v 到 0.19m/s 有实测),DRIVE 用速度外环 Kv->theta_ref
+ * 维持巡航;斜坡在 launch 结束时用实测速度接力(gimbal_task.c),
+ * 不再从 0 重爬把车刹回坑里。bias 全部回真实平衡点 -0.8。
+ */
+#define BALANCE_MODE_STAND_BIAS_DEG         (-0.8f)
+#define BALANCE_MODE_FORWARD_BIAS_DEG       (-0.8f)
+#define BALANCE_MODE_BACKWARD_BIAS_DEG      (-0.8f)
 #define BALANCE_MODE_LAUNCH_ENABLE          1U
-#define BALANCE_MODE_LAUNCH_TIME_SEC        0.20f
-#define BALANCE_MODE_LAUNCH_BIAS_DEG        0.6f
+#define BALANCE_MODE_LAUNCH_TIME_SEC        0.40f
+/*
+ * 19:44 数据:bias=1.0 时车身干净追到 +0.28(相对平衡点仅 ~1.1deg),
+ * 小于分离角 ~1.4deg,轮子全程未破摩擦(v=0)。16:14 能成功是因为
+ * 当时角度环过冲到 +2.37deg。现在角度环不过冲,bias 必须自己给够:
+ * 2.2deg > 分离角。破摩擦成功(|v| 进平滑窗口)立即提前退出 launch,
+ * 防止继续追 +1.4deg 一路加速到守卫线。
+ */
+#define BALANCE_MODE_LAUNCH_BIAS_DEG        2.2f
+#define BALANCE_MODE_LAUNCH_EXIT_MPS        0.15f
 #define BALANCE_MODE_DRIVE_USE_ACTUAL_BASE  1U
+#define BALANCE_MODE_DRIVE_THETA_REF_ENABLE 1U
 #define BALANCE_MODE_STOP_BRAKE_ENABLE      1U
 #define BALANCE_MODE_STOP_BRAKE_TIME_SEC    0.80f
 #define BALANCE_MODE_STOP_BRAKE_OFF_MPS     0.02f
-#define BALANCE_MODE_STOP_BRAKE_GAIN        2.00f
+/*
+ * 20:02 数据:轮级反向刹车(GAIN 2.0 + 直立环 0.25 折)一次都没生效——
+ * 旧激活逻辑被速度噪声(±0.03)一拍抖穿即永久清 timer。修复窗口逻辑
+ * 后改走姿态域刹车:GAIN 归零(轮级反转会把车身推得更前倾)、直立环
+ * 权限恢复满额,刹车改为窗口内叠加 -KV_BRAKE*v 的后仰目标(限幅 1deg)。
+ */
+#define BALANCE_MODE_STOP_BRAKE_GAIN        0.0f
 #define BALANCE_MODE_STOP_BRAKE_LIMIT_RPM   160.0f
-#define BALANCE_MODE_STOP_BRAKE_BALANCE_SCALE 0.25f
+#define BALANCE_MODE_STOP_BRAKE_BALANCE_SCALE 1.0f
+#define BALANCE_MODE_STOP_BRAKE_KV_DEG_PER_MPS 8.0f
+#define BALANCE_MODE_STOP_BRAKE_TREF_LIMIT_DEG 1.0f
+#define BALANCE_MODE_STOP_BRAKE_LOWV_EXIT_SEC  0.15f
 #define BALANCE_MODE_BRAKE_RECOVER_ANGLE_DEG 2.0f
-#define BALANCE_MODE_PULSE_DRIVE_ENABLE     1U
+/*
+ * pulse 蠕动关闭:brake_on=0.10m/s 会把车永远压在粘滑楼板(平滑
+ * 滚动窗口 0.15~0.35m/s)以下,和 15:23 的摩擦结论自相矛盾。
+ */
+#define BALANCE_MODE_PULSE_DRIVE_ENABLE     0U
 #define BALANCE_MODE_PULSE_DRIVE_TIME_SEC   1.20f
 #define BALANCE_MODE_PULSE_BRAKE_TIME_SEC   0.70f
 #define BALANCE_MODE_PULSE_BRAKE_MIN_TIME_SEC 0.20f
 #define BALANCE_MODE_PULSE_HOLD_TIME_SEC    0.15f
 #define BALANCE_MODE_PULSE_BRAKE_ON_MPS     0.10f
 #define BALANCE_MODE_PULSE_RESUME_MPS       0.03f
-#define BALANCE_MODE_PULSE_DRIVE_BASE_RPM   25.0f
+#define BALANCE_MODE_PULSE_DRIVE_BASE_RPM   0.0f
 /*
  * 行走速度必须在"平滑滚动窗口"内,不能贴着摩擦楼板爬:
  * 数据实测粘滑破摩擦自然窜速 0.25m/s,不可回收区 >0.4~0.5m/s(守卫封顶)。
  * 0.06m/s(18rpm) 在楼板以下,表现只能是"不动或窜";
  * 0.20m/s(62rpm) 在窗口中间,且是轮速内环验证过的舒适区。
  */
-#define BALANCE_MODE_DRIVE_VELOCITY_MPS     0.15f
+#define BALANCE_MODE_DRIVE_VELOCITY_MPS     0.20f
 /*
  * 闭环限速守卫:|v| 超过 ON 阈值时把速度目标强制为 0(撤销前进指令,
  * 全部外环权限用于刹车),并冻结速度积分;低于 OFF 阈值恢复。带迟滞防抖。
