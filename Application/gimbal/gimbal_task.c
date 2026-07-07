@@ -117,6 +117,11 @@ static uint8_t balance_accel_lpf_ready = 0U;
 static float balance_speed_integral_m = 0.0f;
 static uint8_t balance_speed_guard_active = 0U;
 static ChassisMode_e balance_integral_last_mode = CHASSIS_MODE_STAND;
+static float balance_drive_launch_timer_sec = 0.0f;
+static float balance_stop_brake_timer_sec = 0.0f;
+static float balance_drive_pulse_timer_sec = 0.0f;
+static float balance_drive_pulse_brake_timer_sec = 0.0f;
+static float balance_drive_pulse_hold_timer_sec = 0.0f;
 /* 零点自学习 trim:整个会话保留,不随 fault/重新解锁清零 */
 static float balance_zero_trim_deg = 0.0f;
 
@@ -523,6 +528,11 @@ static void Chassis_ResetBalancePid(void)
     balance_position_ref_m = 0.0f;
     balance_speed_integral_m = 0.0f;
     balance_speed_guard_active = 0U;
+    balance_drive_launch_timer_sec = 0.0f;
+    balance_stop_brake_timer_sec = 0.0f;
+    balance_drive_pulse_timer_sec = 0.0f;
+    balance_drive_pulse_brake_timer_sec = 0.0f;
+    balance_drive_pulse_hold_timer_sec = 0.0f;
     balance_velocity_lpf_mps = 0.0f;
     balance_velocity_lpf_ready = 0U;
     balance_velocity_ref_ramp_mps = 0.0f;
@@ -561,6 +571,12 @@ static void Chassis_ResetModeIntegrator(void)
     balance_position_ref_m = BALANCE_PID_POSITION_SIGN * balance_position_m;
     balance_velocity_ref_ramp_mps = 0.0f;
     balance_speed_integral_m = 0.0f;
+    balance_drive_launch_timer_sec = 0.0f;
+    balance_stop_brake_timer_sec = 0.0f;
+    balance_drive_pulse_timer_sec = 0.0f;
+    balance_drive_pulse_brake_timer_sec = 0.0f;
+    balance_drive_pulse_hold_timer_sec = 0.0f;
+    Chassis_ResetSpeedCtrl();
 }
 
 static float Chassis_GetWheelSpeedRpm(const volatile Motor_Measure_t *motor)
@@ -643,6 +659,7 @@ static float Chassis_SpeedPidUpdate(float ref_rpm,
     float speed_error;
     float proportional_error;
     float error_deadband;
+    float speed_ff;
     float u_unsat;
     float output;
     float max_current_step;
@@ -671,7 +688,15 @@ static float Chassis_SpeedPidUpdate(float ref_rpm,
         *integral = 0.0f;
     }
 
-    u_unsat = (Chassis_SpeedFeedforward(ref_rpm) +
+    speed_ff = Chassis_SpeedFeedforward(ref_rpm);
+#if WHEEL_SPEED_FF_DISABLE_WHEN_BRAKING
+    if ((ref_rpm * feedback_rpm > 0.0f) &&
+        (Chassis_AbsF(ref_rpm) < Chassis_AbsF(feedback_rpm))) {
+        speed_ff = 0.0f;
+    }
+#endif
+
+    u_unsat = (speed_ff +
                WHEEL_SPEED_PID_KP_A_PER_RPM * proportional_error +
                WHEEL_SPEED_PID_KI_A_PER_RPM_S * (*integral) -
                WHEEL_SPEED_PID_KD_A_PER_RPM * feedback_rpm) *
@@ -831,6 +856,7 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
     float theta_rate_dps;
     float theta_error_deg;
     float target_velocity_mps;
+    float mode_target_velocity_mps;
     float speed_error_mps;
     float accel_raw_mps2;
     float accel_error_mps2;
@@ -838,14 +864,21 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
     float position_error_m;
     float speed_theta_ref_deg;
     float mode_bias_deg;
-    float drive_wheel_ff_rpm;
+    float drive_base_rpm;
+    float stop_brake_rpm;
+    float launch_bias_deg;
     float balance_speed_ref_rpm;
     float turn_speed_ref_rpm;
     float left_ref_rpm;
     float right_ref_rpm;
     float left_out;
     float right_out;
+    ChassisMode_e previous_mode;
     uint8_t drive_bias_mode;
+    uint8_t drive_launch_active;
+    uint8_t drive_pulse_brake_active;
+    uint8_t drive_pulse_hold_active;
+    uint8_t stop_brake_active;
 
     if (chassis_motor_state != CHASSIS_MOTOR_BALANCE_PID) {
         Chassis_ResetBalancePid();
@@ -947,12 +980,47 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
 #endif
 
     target_velocity_mps = Chassis_ModeTargetVelocityMps(chassis_mode);
+    mode_target_velocity_mps = target_velocity_mps;
     mode_bias_deg = Chassis_ModeTargetBiasDeg(chassis_mode);
     drive_bias_mode = ((chassis_mode == CHASSIS_MODE_FORWARD) ||
                        (chassis_mode == CHASSIS_MODE_BACKWARD)) ? 1U : 0U;
     if (chassis_mode != balance_integral_last_mode) {
+        previous_mode = balance_integral_last_mode;
         balance_speed_integral_m = 0.0f;
         balance_integral_last_mode = chassis_mode;
+        if (drive_bias_mode != 0U) {
+#if BALANCE_MODE_LAUNCH_ENABLE
+            balance_drive_launch_timer_sec = BALANCE_MODE_LAUNCH_TIME_SEC;
+#else
+            balance_drive_launch_timer_sec = 0.0f;
+#endif
+            balance_stop_brake_timer_sec = 0.0f;
+#if BALANCE_MODE_PULSE_DRIVE_ENABLE
+            balance_drive_pulse_timer_sec =
+                BALANCE_MODE_PULSE_DRIVE_TIME_SEC;
+#else
+            balance_drive_pulse_timer_sec = 0.0f;
+#endif
+            balance_drive_pulse_brake_timer_sec = 0.0f;
+            balance_drive_pulse_hold_timer_sec = 0.0f;
+        } else {
+            balance_drive_launch_timer_sec = 0.0f;
+            balance_drive_pulse_timer_sec = 0.0f;
+            balance_drive_pulse_brake_timer_sec = 0.0f;
+            balance_drive_pulse_hold_timer_sec = 0.0f;
+#if BALANCE_MODE_STOP_BRAKE_ENABLE
+            if ((chassis_mode == CHASSIS_MODE_STAND) &&
+                ((previous_mode == CHASSIS_MODE_FORWARD) ||
+                 (previous_mode == CHASSIS_MODE_BACKWARD))) {
+                balance_stop_brake_timer_sec =
+                    BALANCE_MODE_STOP_BRAKE_TIME_SEC;
+            } else {
+                balance_stop_brake_timer_sec = 0.0f;
+            }
+#else
+            balance_stop_brake_timer_sec = 0.0f;
+#endif
+        }
     }
     /*
      * 闭环限速守卫(带迟滞):超速时撤销行走速度目标,让外环全部权限
@@ -968,6 +1036,103 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
         target_velocity_mps = 0.0f;
         /* 不等斜坡,立刻撤销速度目标,让 Kv 项全额刹车 */
         balance_velocity_ref_ramp_mps = 0.0f;
+    }
+    drive_launch_active =
+        ((drive_bias_mode != 0U) &&
+         (balance_drive_launch_timer_sec > 0.0f)) ? 1U : 0U;
+    if (drive_launch_active != 0U) {
+        target_velocity_mps = 0.0f;
+        balance_velocity_ref_ramp_mps = 0.0f;
+        balance_drive_launch_timer_sec =
+            Chassis_StepTowards(balance_drive_launch_timer_sec,
+                                0.0f,
+                                BALANCE_PID_DT_SEC);
+    }
+    drive_pulse_brake_active = 0U;
+    drive_pulse_hold_active = 0U;
+#if BALANCE_MODE_PULSE_DRIVE_ENABLE
+    if (drive_bias_mode != 0U) {
+        if (balance_drive_pulse_brake_timer_sec > 0.0f) {
+            drive_pulse_brake_active = 1U;
+        } else if (balance_drive_pulse_hold_timer_sec > 0.0f) {
+            drive_pulse_hold_active = 1U;
+        } else if ((drive_launch_active == 0U) &&
+                   ((balance_drive_pulse_timer_sec <= 0.0f) ||
+                    (Chassis_AbsF(measured_velocity_mps) >
+                     BALANCE_MODE_PULSE_BRAKE_ON_MPS))) {
+            balance_drive_pulse_brake_timer_sec =
+                BALANCE_MODE_PULSE_BRAKE_TIME_SEC;
+            drive_pulse_brake_active = 1U;
+        } else if (drive_launch_active == 0U) {
+            balance_drive_pulse_timer_sec =
+                Chassis_StepTowards(balance_drive_pulse_timer_sec,
+                                    0.0f,
+                                    BALANCE_PID_DT_SEC);
+        }
+
+        if (drive_pulse_brake_active != 0U) {
+            float resume_timer_sec = BALANCE_MODE_PULSE_BRAKE_TIME_SEC -
+                                     BALANCE_MODE_PULSE_BRAKE_MIN_TIME_SEC;
+            if (resume_timer_sec < 0.0f) {
+                resume_timer_sec = 0.0f;
+            }
+            target_velocity_mps = 0.0f;
+            balance_velocity_ref_ramp_mps = 0.0f;
+            balance_drive_pulse_brake_timer_sec =
+                Chassis_StepTowards(balance_drive_pulse_brake_timer_sec,
+                                    0.0f,
+                                    BALANCE_PID_DT_SEC);
+            if ((balance_drive_pulse_brake_timer_sec <= 0.0f) ||
+                ((balance_drive_pulse_brake_timer_sec <= resume_timer_sec) &&
+                 (Chassis_AbsF(measured_velocity_mps) <
+                 BALANCE_MODE_PULSE_RESUME_MPS))) {
+                balance_drive_pulse_brake_timer_sec = 0.0f;
+                if (BALANCE_MODE_PULSE_HOLD_TIME_SEC > 0.0f) {
+                    balance_drive_pulse_hold_timer_sec =
+                        BALANCE_MODE_PULSE_HOLD_TIME_SEC;
+                    drive_pulse_hold_active = 1U;
+                } else {
+                    balance_drive_pulse_timer_sec =
+                        BALANCE_MODE_PULSE_DRIVE_TIME_SEC;
+                }
+                drive_pulse_brake_active = 0U;
+            }
+        } else if (drive_pulse_hold_active != 0U) {
+            target_velocity_mps = 0.0f;
+            balance_velocity_ref_ramp_mps = 0.0f;
+            balance_drive_pulse_hold_timer_sec =
+                Chassis_StepTowards(balance_drive_pulse_hold_timer_sec,
+                                    0.0f,
+                                    BALANCE_PID_DT_SEC);
+            if (balance_drive_pulse_hold_timer_sec <= 0.0f) {
+                balance_drive_pulse_hold_timer_sec = 0.0f;
+                balance_drive_pulse_timer_sec =
+                    BALANCE_MODE_PULSE_DRIVE_TIME_SEC;
+                drive_pulse_hold_active = 0U;
+            }
+        }
+    }
+#else
+    (void)drive_pulse_brake_active;
+    (void)drive_pulse_hold_active;
+#endif
+    stop_brake_active =
+        ((((chassis_mode == CHASSIS_MODE_STAND) &&
+           (balance_stop_brake_timer_sec > 0.0f) &&
+           (Chassis_AbsF(measured_velocity_mps) >
+            BALANCE_MODE_STOP_BRAKE_OFF_MPS)) ||
+          (drive_pulse_brake_active != 0U)) ? 1U : 0U);
+    if ((stop_brake_active != 0U) &&
+        (Chassis_AbsF(theta_deg) > BALANCE_MODE_BRAKE_RECOVER_ANGLE_DEG)) {
+        stop_brake_active = 0U;
+    }
+    if (stop_brake_active != 0U) {
+        balance_stop_brake_timer_sec =
+            Chassis_StepTowards(balance_stop_brake_timer_sec,
+                                0.0f,
+                                BALANCE_PID_DT_SEC);
+    } else if (chassis_mode == CHASSIS_MODE_STAND) {
+        balance_stop_brake_timer_sec = 0.0f;
     }
     balance_velocity_ref_ramp_mps =
         Chassis_StepTowards(balance_velocity_ref_ramp_mps,
@@ -1004,7 +1169,11 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
      * 且衰减到 0 即停,不会积成反向,windup 保护仍成立。
      * stand 模式不积分,保持原 P+V 行为不变。
      */
-    if (drive_bias_mode != 0U) {
+    if ((drive_launch_active != 0U) || (drive_pulse_brake_active != 0U) ||
+        (stop_brake_active != 0U) ||
+        (drive_pulse_hold_active != 0U)) {
+        balance_speed_integral_m = 0.0f;
+    } else if (drive_bias_mode != 0U) {
         if (balance_speed_guard_active == 0U) {
             balance_speed_integral_m += speed_error_mps * BALANCE_PID_DT_SEC;
         } else {
@@ -1027,6 +1196,12 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
         BALANCE_POSITION_KI_DEG_PER_M_S * balance_speed_integral_m;
     speed_theta_ref_deg = Chassis_LimitAbs(speed_theta_ref_deg,
                                            BALANCE_PID_THETA_REF_LIMIT_DEG);
+    if (drive_launch_active != 0U) {
+        launch_bias_deg = (mode_target_velocity_mps >= 0.0f) ?
+                          BALANCE_MODE_LAUNCH_BIAS_DEG :
+                          -BALANCE_MODE_LAUNCH_BIAS_DEG;
+        speed_theta_ref_deg = launch_bias_deg;
+    }
 
     theta_ref_deg = balance_manual_bias_deg + mode_bias_deg +
                     speed_theta_ref_deg;
@@ -1041,10 +1216,14 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
     balance_speed_ref_rpm =
         Chassis_LimitAbs(balance_speed_ref_rpm,
                          balance_pid_runtime_speed_limit_rpm);
+    if (stop_brake_active != 0U) {
+        balance_speed_ref_rpm *= BALANCE_MODE_STOP_BRAKE_BALANCE_SCALE;
+    }
 
     turn_speed_ref_rpm = Chassis_ModeTurnSpeedRpm(chassis_mode);
     turn_speed_ref_rpm = Chassis_LimitAbs(turn_speed_ref_rpm,
                                           balance_pid_runtime_speed_limit_rpm);
+    /* Legacy fixed-feedforward note; active code below uses actual-base. */
     /*
      * 行走速度前馈:把 v_ref 直接换算成轮速(0.10m/s≈31rpm)加到左右轮
      * 目标上,由轮速内环(自带积分+静摩擦前馈)破静摩擦持续滚动;
@@ -1052,16 +1231,45 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
      * 依据:纯倾角方案实测为 1.5s 周期 stick-slip 极限环(积分顶满
      * 1.5deg、theta 倾 1.36deg 车仍原地抖,v 均值仅 0.007m/s)。
      * 守卫触发时 ramp 已被置 0,前馈随之立即消失。
+    */
+    /*
+     * Current drive structure: v_ref only shapes theta_ref. The speed
+     * controller base follows measured wheel speed, so balance correction
+     * cannot be cancelled by a fixed target-speed feedforward at standstill.
      */
-    drive_wheel_ff_rpm = 0.0f;
-    if (drive_bias_mode != 0U) {
-        drive_wheel_ff_rpm = BALANCE_PID_VELOCITY_SIGN *
-                             balance_velocity_ref_ramp_mps /
-                             BALANCE_RPM_TO_MPS;
+    drive_base_rpm = 0.0f;
+    if ((drive_bias_mode != 0U) &&
+        (drive_launch_active == 0U) &&
+        (drive_pulse_brake_active == 0U) &&
+        (drive_pulse_hold_active == 0U) &&
+        (stop_brake_active == 0U)) {
+#if BALANCE_MODE_DRIVE_USE_ACTUAL_BASE
+        drive_base_rpm = 0.5f * (left_rpm + right_rpm);
+#if BALANCE_MODE_PULSE_DRIVE_ENABLE
+        if (mode_target_velocity_mps >= 0.0f) {
+            drive_base_rpm += BALANCE_MODE_PULSE_DRIVE_BASE_RPM;
+        } else {
+            drive_base_rpm -= BALANCE_MODE_PULSE_DRIVE_BASE_RPM;
+        }
+#endif
+#else
+        drive_base_rpm = BALANCE_PID_VELOCITY_SIGN *
+                         balance_velocity_ref_ramp_mps /
+                         BALANCE_RPM_TO_MPS;
+#endif
     }
-    left_ref_rpm = balance_speed_ref_rpm + drive_wheel_ff_rpm +
+    stop_brake_rpm = 0.0f;
+    if (stop_brake_active != 0U) {
+        stop_brake_rpm = -BALANCE_MODE_STOP_BRAKE_GAIN *
+                         measured_velocity_mps /
+                         BALANCE_RPM_TO_MPS;
+        stop_brake_rpm =
+            Chassis_LimitAbs(stop_brake_rpm,
+                             BALANCE_MODE_STOP_BRAKE_LIMIT_RPM);
+    }
+    left_ref_rpm = balance_speed_ref_rpm + drive_base_rpm + stop_brake_rpm +
                    BALANCE_PID_LEFT_YAW_SIGN * turn_speed_ref_rpm;
-    right_ref_rpm = balance_speed_ref_rpm + drive_wheel_ff_rpm +
+    right_ref_rpm = balance_speed_ref_rpm + drive_base_rpm + stop_brake_rpm +
                     BALANCE_PID_RIGHT_YAW_SIGN * turn_speed_ref_rpm;
     left_ref_rpm = Chassis_LimitAbs(left_ref_rpm,
                                     balance_pid_runtime_speed_limit_rpm);

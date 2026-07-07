@@ -2319,3 +2319,308 @@ position_theta_ref = Kp_pos * position_error = -Kp_pos * x
 
 - `Application/gimbal/gimbal_task.c` 已通过 `arm-none-eabi-gcc -fsyntax-only`。
 - 下一次测试：在 `1` 前进中按 KEY 急停，再按 KEY 解锁，I14 应先保持 `0`，不会自动恢复 `1`。
+
+## 2026-07-07 LAUNCH 起步阶段：先给目标倾角，后接速度前馈
+
+### 背景
+
+- 当前 baseline 已本地提交：`3e3a56e Record balance drive tuning baseline`。
+- 远程 GitHub push 被执行环境策略拦截，当前本地分支为 `main...origin/main [ahead 1]`。
+- 15:23 数据说明 forward 卡住不是单纯参数问题，而是轮速前馈和直立环轮速修正在同一级相互抵消：`drive_ff≈+56rpm`，`balance_ref≈-58rpm`，净指令约 `-2rpm`，落进静摩擦死区。
+
+### 本次结构修改
+
+进入 `forward/backward` 后新增一个短暂 `LAUNCH` 阶段：
+
+| 阶段 | 持续 | 行为 |
+|---|---:|---|
+| LAUNCH | `0.40s` | `v_ref=0`，速度 ramp 清零，速度积分清零，轮速前馈关闭，只给 `theta_ref=±1deg` |
+| DRIVE | LAUNCH 后 | 恢复原来的速度 ramp、Kv 外环和轮速前馈 |
+
+目的不是关闭直立环，而是把直立环的目标点短暂移动：前进先让车主动追 `+1deg`，后退追 `-1deg`，先跳出静摩擦死锁坑，再进入速度控制。
+
+### 测试方法
+
+1. 烧录后 KEY 解锁，只测 `stand` 10~20s，确认 `fault=0`，I0 `theta` 在小范围内，I15 `zero_trim_deg` 缓慢稳定。
+2. 发 `1` 前进，重点看前 0.4s：
+   - I1 `theta_ref_deg` 应约为 `+1.0deg`。
+   - I7 `velocity_ref_mps` 应保持 `0`。
+   - I10 `avg_ref_rpm` 不应出现约 `+56rpm` 的速度前馈基线。
+3. 0.4s 后继续观察：
+   - I7 应按斜坡升向 `+0.20m/s`。
+   - I10 才开始出现速度前馈对应的正向轮速指令。
+   - 若车能越过静摩擦坑，应看到实际轮速/速度连续起来，而不是长期贴近 0。
+4. 发 `0` 停车，确认能回 stand。
+5. 若 launch 一开始明显往反方向倒、轮子反抽，或 `theta` 快速越过 `2~3deg` 还继续扩大，立刻 KEY 急停，导出 CSV；下一步优先翻转 `BALANCE_MODE_LAUNCH_BIAS_DEG` 的符号或缩短 launch 时间。
+
+### 编译验证
+
+- `Application/gimbal/gimbal_task.c` 已通过 `arm-none-eabi-gcc -fsyntax-only -Wall`。
+- `git diff --check -- Application/gimbal/gimbal_task.c Inc/config.h process.md` 通过。
+
+## 2026-07-07 16:14 LAUNCH 数据：起步有效，但 DRIVE 仍被固定前馈吸回死锁
+
+### 数据结论
+
+- 新数据 `vofa+.csv` 共 6818 行，`fault=0` 全程无保护。
+- 安静近直立 stand 段：`theta` 均值约 `-0.125deg`，`zero_trim` 仅约 `-0.11deg`，所以这次看到的 forward 后仰不是 IMU 零点突然偏了。
+- 第一次 forward 的 LAUNCH 前 0.4s 有效果：`theta_ref=+1deg`，实际 `theta` 到约 `+2.37deg`，速度到约 `0.13~0.19m/s`。
+- 但进入 DRIVE 后重新掉入同一个抵消点：
+  - 后期 `theta≈-1.25deg`，`theta_ref≈+0.50deg`。
+  - `theta-theta_ref≈-1.75deg`，角度环 `balance_ref≈-61rpm`。
+  - 固定速度前馈 `drive_ff≈+61.6rpm`。
+  - `avg_ref≈0rpm`，`avg_actual≈0rpm`，车又被静摩擦锁住。
+
+### 结构修改
+
+- `BALANCE_MODE_DRIVE_USE_ACTUAL_BASE = 1`。
+- DRIVE 段不再把 `v_ref / RPM_TO_MPS` 作为固定轮速前馈加到轮速目标。
+- 新合成：
+
+```c
+drive_base_rpm = 0.5f * (left_rpm + right_rpm);
+wheel_ref = drive_base_rpm + balance_ref + yaw_ref;
+```
+
+- 含义：速度目标只通过外环改变 `theta_ref`；轮速内环的基底跟随当前实测轮速，直立环输出只做相对修正。
+- 目的：在刚才的死锁点，`balance_ref=-61rpm` 不会再被固定 `+61rpm` 抵消，轮速目标会真正离开 0。
+
+### 下一次测试
+
+1. 烧录后先 stand 10~20s，确认 `fault=0`、`theta` 接近 0、`zero_trim` 没有快速跑偏。
+2. 发 `1`：
+   - LAUNCH 前 0.4s 仍应看到 I1 `theta_ref≈+1deg`，I7 `v_ref=0`。
+   - 0.4s 后 I7 继续爬向 `+0.20m/s`。
+   - 关键检查：I10-I9 不应再固定等于 `+61rpm`，而应大致等于 I11 `avg_actual_rpm`。
+3. 若车仍不走，看后期是否还有 `avg_ref≈0`：
+   - 若 I9 已给出明显轮速目标但实际不动，问题转向轮速内环/电流/静摩擦。
+   - 若 I9 方向导致车反向走，下一步查 `theta_ref` 行走符号，而不是再调角度 offset。
+
+## 2026-07-07 16:27 数据：停车慢，原因是停车初段仍给同向轮速
+
+### 数据结论
+
+- 新数据共 2723 行，`fault=0`。
+- `1 -> 0` 发生在 `t=40.64s`，切回 stand 时：
+  - `velocity_mps≈+0.093`
+  - `avg_actual≈+26.7rpm`
+  - `theta_ref≈-0.232deg`
+  - `balance_ref/avg_ref≈+17rpm`
+- 问题：停车初段虽然目标轮速比实际小，但仍是正向目标；轮速 PID 还会加正向静摩擦前馈，所以前 0.8s 不是强刹，体感像“按 0 后还往前带一下”。数据里速度一度升到约 `0.157m/s`，约 2s 才基本停稳。
+
+### 修改
+
+- `BALANCE_MODE_DRIVE_VELOCITY_MPS: 0.20 -> 0.15`，降低行走动能；可以接受 `1` 时慢一点，换更容易停车。
+- `WHEEL_SPEED_FF_DISABLE_WHEN_BRAKING = 1`：当目标和实际同向、且目标绝对值小于实际值时，关闭同向静摩擦前馈，避免“减速时还帮它推”。
+- 模式切换时调用 `Chassis_ResetSpeedCtrl()`，清掉轮速 PI 积分和上次输出，避免 `1 -> 0` 延续旧输出。
+- 新增 `STOP_BRAKE`：
+  - 只在 `forward/backward -> stand` 后启动。
+  - 最多持续 `0.80s`，速度低于 `0.02m/s` 提前退出。
+  - 轮速目标叠加 `stop_brake_rpm = -1.5 * velocity / RPM_TO_MPS`，限幅 `±90rpm`。
+
+### 预期
+
+- 用 16:27 停车瞬间回放：
+  - 旧：`avg_ref≈+17rpm`，实际 `+26.7rpm`，仍是正向小目标。
+  - 新：制动项约 `-43rpm`，合成后 `avg_ref≈-26rpm`，会立刻给反向制动。
+- 下一次测试：
+  1. 发 `1` 后速度目标应爬向 `0.15m/s`。
+  2. 发 `0` 后 I10 `avg_ref_rpm` 应在前 0.8s 明显反向，不应继续跟实际速度同向小幅正转。
+3. 期望停车时间明显短于 2s；若反向过冲太大，再降低 `BALANCE_MODE_STOP_BRAKE_GAIN` 或 `LIMIT_RPM`。
+
+## 2026-07-07 16:36 数据：STOP_BRAKE 被完整直立环压过，导致越刹越快
+
+### 数据结论
+
+- 新数据共 3334 行，`fault=0`。
+- 只有两段很短的 forward：第一次约 `1.44s`，第二次约 `0.82s`，`v_ref` 还没爬到 0.15，但停车后速度仍明显上升。
+- 第一次 `1 -> 0` 后：
+  - `0.00s`: `vel=+0.044`，旧合成 `avg_ref=+2.5rpm`，仍不是反向刹车。
+  - `0.72s`: `vel=+0.243`，`theta=+4.607deg`，完整直立环 `balance_ref=+186.5rpm`。
+  - 当时 `STOP_BRAKE` 已经给到约 `-90rpm`，但被 `+186.5rpm` 压过，合成后 `avg_ref=+96.5rpm`，轮子继续正转，速度继续涨。
+  - `0.80s` 后制动计时结束，直立环仍正向追车，最大速度冲到 `0.856m/s`，随后车身大角度摆动再被拉回。
+- 第二次同理：`0.72s` 左右 `vel=+0.155`，`balance_ref=+135rpm`，旧合成仍 `avg_ref=+63.7rpm`。
+
+### 结论
+
+- 停车慢不是制动项没生效，而是**停车阶段完整直立环优先级过高**。
+- 车身前倾时直立环为了扶正，会命令轮子继续向前追车身；这在停车阶段等价于继续加速。
+- 因此停车必须短暂“刹车优先”：允许牺牲一部分直立环跟随，不让它完整抵消反向制动。
+
+### 修改
+
+- `BALANCE_MODE_STOP_BRAKE_GAIN: 1.50 -> 2.00`。
+- `BALANCE_MODE_STOP_BRAKE_LIMIT_RPM: 90 -> 160`。
+- 新增 `BALANCE_MODE_STOP_BRAKE_BALANCE_SCALE = 0.25`。
+- `STOP_BRAKE` 激活时：
+
+```c
+balance_ref *= 0.25;
+stop_brake_rpm = -2.0 * velocity / RPM_TO_MPS;
+stop_brake_rpm = limit(stop_brake_rpm, ±160rpm);
+avg_ref = balance_ref + stop_brake_rpm;
+```
+
+### 回放预期
+
+| 数据点 | 旧 `avg_ref` | 新估算 `avg_ref` |
+|---|---:|---:|
+| 第一次 `0` 后 0.00s | `+2.5rpm` | `-21.4rpm` |
+| 第一次 `0` 后 0.08s | `+59.4rpm` | `-18.2rpm` |
+| 第一次 `0` 后 0.72s | `+96.5rpm` | `-103.1rpm` |
+| 第二次 `0` 后 0.72s | `+63.7rpm` | `-61.7rpm` |
+
+- 下一次测试如果反向过冲明显，先降 `BALANCE_MODE_STOP_BRAKE_GAIN` 到 `1.50`，不要恢复完整直立环优先级。
+
+## 2026-07-07 改为脉冲行走：走一小段，刹一小段
+
+### 判断
+
+- 可以考虑直走减速，但当前连续速度环仍会被直立环优先级影响：速度一起来后，车身前倾，直立环会命令轮子继续追车身，导致减速目标被吃掉。
+- 现阶段先不追求连续匀速，把 forward 降级成“脉冲爬行”更稳：允许走一小段、刹一小段、再走一小段。
+
+### 修改
+
+- `BALANCE_MODE_PULSE_DRIVE_ENABLE = 1`。
+- forward 进入后仍保留 LAUNCH。
+- LAUNCH 后进入 DRIVE 窗口：
+  - 最多 drive `0.35s`。
+  - 或者 `|velocity_mps| > 0.10m/s` 时提前进入 brake。
+- PULSE_BRAKE：
+  - 最多 brake `0.70s`。
+  - `|velocity_mps| < 0.03m/s` 时提前恢复 drive。
+  - brake 期间复用 STOP_BRAKE：`v_ref=0`、轮速基底关闭、直立环输出降到 25%、反向轮速阻尼生效。
+
+### 对 16:36 数据的预期
+
+- 第一次 forward：旧数据约 1.10s 才超过 `0.10m/s`，新逻辑会先被 `0.35s` drive 窗口切入 brake。
+- 第二次 forward：旧数据约 0.42s 就超过 `0.10m/s`，新逻辑会提前切入 brake。
+- VOFA 观察：
+  - I14 仍为 `1`，因为还在 forward 命令中。
+  - I7 `velocity_ref_mps` 会呈现 `0 -> ramp -> 0 -> ramp -> 0` 的节拍。
+  - I10 `avg_ref_rpm` 在 brake 窗口应明显反向，不能继续跟着实际速度同向加速。
+
+## 2026-07-07 16:53 数据：脉冲存在，但后续 drive 太弱，肉眼像只蠕动一次
+
+### 数据结论
+
+- 当前目录只有 `vofa+.csv`，未看到单独的 `vofa+1.csv`；本节分析的是 `2026/7/7 16:53:16` 的 `vofa+.csv`。
+- 第三段 forward 最能说明问题：
+  - 第一次蠕动 `t=69.04~70.12s`：
+    - `theta_ref` 最高 `1.000deg`
+    - `avg_ref` 最高 `66.2rpm`
+    - `avg_actual` 最高 `22.0rpm`
+    - `cmdA` 最高 `0.104A`
+    - 所以能明显动一下。
+  - 后面 `t=70.52~83.64s`：
+    - `v_ref` 仍在脉冲，最高 `0.028m/s`
+    - 但 `theta_ref` 只有 `0~0.083deg`
+    - `avg_ref` 只有 `-4.5~5.6rpm`
+    - `avg_actual` 只有 `-3.1~3.8rpm`
+    - `cmdA` 只有约 `±0.027A`
+- 结论：状态机不是只执行一次；后续确实在 pulse，但每个 drive 窗口太弱，破不了静摩擦，所以看起来像“蠕动一次就不动了”。
+
+### 原因
+
+- 当前 drive 窗口 `0.35s`，速度 ramp 只有 `0.08m/s/s`：
+
+```text
+最大 v_ref = 0.35 * 0.08 = 0.028m/s
+theta_ref 约 = 2.5 * 0.028 = 0.07deg
+balance_ref 约 = 35 * 0.07 = 2.5rpm
+```
+
+- 稳住之后车身角度很小，直立环只给几 rpm 的修正；再加上 `DRIVE_USE_ACTUAL_BASE=1` 时基底跟随实测轮速，车停住后基底也接近 0，于是后续 pulse 没有真正的起步推力。
+
+### 修改：真正做成“走一段、停一段、再走一段”
+
+- 初始 LAUNCH 降低，避免再次把角度顶炸：
+  - `BALANCE_MODE_LAUNCH_TIME_SEC: 0.40 -> 0.20`
+  - `BALANCE_MODE_LAUNCH_BIAS_DEG: 1.0 -> 0.6`
+- 每个 drive 段加入最小行走基底：
+  - `BALANCE_MODE_PULSE_DRIVE_BASE_RPM = 25.0`
+  - drive 段目标变成 `actual_avg_rpm + 25rpm`，不再只靠几 rpm 的角度修正破静摩擦。
+- brake 段不允许速度一低就立刻退出：
+  - `BALANCE_MODE_PULSE_BRAKE_MIN_TIME_SEC = 0.20`
+  - 先至少刹 `0.20s`，之后才允许按 `|v| < 0.03m/s` 提前结束。
+- brake 后新增 hold 段：
+  - `BALANCE_MODE_PULSE_HOLD_TIME_SEC = 0.15`
+  - hold 段 `v_ref=0`、无 drive base、完整直立，形成肉眼可见的“停一下”。
+
+### 下一次测试看什么
+
+1. 发 `1` 后，I7 仍应呈现 `0 -> ramp -> 0 -> hold -> ramp`。
+2. I10 在 drive 段不应再只有几 rpm，而应至少比 I11 多约 `+25rpm`。
+3. brake 段 I10 应明显反向；hold 段 I10 应回到直立维持的小量输出。
+4. 如果仍只动一下，看后续 drive 段 I10-I11 是否真的有约 `25rpm` 差值；若有差值但轮子不动，再把 `BALANCE_MODE_PULSE_DRIVE_BASE_RPM` 加到 `35rpm`。
+
+## 2026-07-07 17:07 数据：节拍有了，但 drive 时间太短，实际没走起来
+
+### 数据结论
+
+- 新数据 `vofa+.csv` 时间为 `2026/7/7 17:07:17`。
+- forward 段 `t=67.98~101.78s`，持续 `33.82s`。
+- 检测到 `48` 个 drive 窗口：
+  - drive 窗口 `0.32~0.34s`，平均 `0.33s`。
+  - 周期约 `0.70s`。
+  - drive 间隔/刹停约 `0.36~0.38s`。
+- 稳定段 `t=68.72~100.00s`：
+  - `theta=-1.53~1.02deg`，姿态基本稳。
+  - `velocity=-0.037~0.051m/s`，速度没有越跑越快。
+  - 但 drive 段实际轮速平均只有 `1.3rpm`，整体仍接近原地抖动。
+- 结论：状态机节拍是对的，但 `0.33s` 太短，轮子刚破静摩擦就被切去刹车，体感上还是没走起来。
+
+### 另外一个风险
+
+- 最后 `t=101.60s` 开始角度突然发散：
+
+```text
+t=101.40s theta=0.523deg, v=0.035, avgref=57.7rpm
+t=101.60s theta=7.034deg, v=0.032, avgref=49.1rpm
+t=101.70s theta=14.862deg
+t=101.80s theta=30.441deg, fault=3
+```
+
+- 当时 `v_ref=0`，说明在 brake/hold 相关阶段；旧逻辑会把直立环压到 25% 并叠加反向刹车，角度偏大时扶正能力不够。
+
+### 修改
+
+- `BALANCE_MODE_PULSE_DRIVE_TIME_SEC: 0.35 -> 0.70`。
+  - 理论最大 `v_ref` 从 `0.028m/s` 提高到 `0.056m/s`。
+  - 目标是让轮子有时间从破静摩擦进入实际滚动，而不是刚动就刹。
+- 新增 `BALANCE_MODE_BRAKE_RECOVER_ANGLE_DEG = 2.0`。
+  - brake/stop_brake 阶段若 `|theta| > 2deg`，取消反向刹车和 `balance_scale=0.25`。
+  - 仍保持 `v_ref=0`、无 drive base，但让完整直立环优先扶正。
+- drive base 条件增加 `drive_pulse_brake_active == 0`：
+  - 即使因为角度保护取消了 stop_brake，也不会在 brake 阶段重新加 `+25rpm` 行走基底。
+
+### 下一次测试看什么
+
+1. I7 的 drive 窗口应变成约 `0.67~0.70s`，不是 `0.32~0.34s`。
+2. I11 `avg_actual_rpm` 在每个 drive 段应明显高于上一版，最好能稳定超过 `10~20rpm`。
+3. I0 若在 brake/hold 中超过 `2deg`，I10 不应继续强反向刹车，而应转为完整直立环扶正输出。
+4. 若仍不走，再考虑把 `BALANCE_MODE_PULSE_DRIVE_BASE_RPM` 从 `25rpm` 提到 `35rpm`；先不同时加时间和推力，避免过冲。
+
+## 2026-07-07 继续加大走路窗口
+
+### 判断
+
+- `0.70s` drive 窗口仍然没明显走起来，说明轮子可能刚破静摩擦、刚开始滚动就进入 brake/hold。
+- 这一步先只加走路时间，不同时加 `drive_base`，避免无法判断到底是时间不足还是推力不足。
+
+### 修改
+
+- `BALANCE_MODE_PULSE_DRIVE_TIME_SEC: 0.70 -> 1.20`。
+- 理论 `v_ref` 峰值：
+
+```text
+1.20s * 0.08m/s/s = 0.096m/s
+```
+
+- 仍低于 `BALANCE_MODE_PULSE_BRAKE_ON_MPS = 0.10m/s`，所以正常情况下由时间窗口结束进入 brake；如果实际速度提前超过 `0.10m/s`，仍会提前刹车。
+
+### 下一次测试看什么
+
+1. I7 drive 窗口应接近 `1.20s`，除非 I6 提前超过 `0.10m/s`。
+2. I11 在 drive 后半段应明显高于 `0.70s` 版本；如果仍低于 `10rpm`，下一步才考虑把 `BALANCE_MODE_PULSE_DRIVE_BASE_RPM` 提到 `35rpm`。
+3. I0 角度如果超过 `2deg`，应优先关注站立/倾角稳定性，不要继续加大走路推力。
