@@ -102,7 +102,7 @@
 #define WHEEL_SPEED_TEST_AUTO_STEP_MS       1500U
 
 /* jixun2风格轮速PID：u = (Kp*err + Ki*integral - Kd*speed) * polarity。 */
-#define WHEEL_SPEED_PID_KP_A_PER_RPM        0.00130f
+#define WHEEL_SPEED_PID_KP_A_PER_RPM        0.00250f
 #define WHEEL_SPEED_PID_KI_A_PER_RPM_S      0.001000f
 #define WHEEL_SPEED_PID_KD_A_PER_RPM        0.000f
 #define WHEEL_SPEED_PID_ERROR_DEADBAND_RPM  0.0f
@@ -138,8 +138,8 @@
 #define CHASSIS_FAULT_PID_ANGLE             3U
 #define CHASSIS_FAULT_PID_RATE              4U
 #define BALANCE_PID_DT_SEC                  (0.001f * (float)WHEEL_SAFE_TASK_PERIOD_MS)
-#define BALANCE_PID_CURRENT_LIMIT_A         0.35f
-#define BALANCE_PID_CURRENT_SLEW_A_PER_SEC  20.0f
+#define BALANCE_PID_CURRENT_LIMIT_A         0.40f
+#define BALANCE_PID_CURRENT_SLEW_A_PER_SEC  60.0f
 #define BALANCE_PID_SAFE_ANGLE_DEG          30.0f
 #define BALANCE_PID_SAFE_RATE_DPS           600.0f
 #define BALANCE_PID_POSITION_LIMIT_M        1.00f
@@ -147,19 +147,22 @@
 #define BALANCE_PID_VELOCITY_LIMIT_MPS      1.5f
 #define BALANCE_PID_THETA_REF_DEG           0.0f
 #define BALANCE_PID_THETA_REF_LIMIT_DEG     3.0f
+#define BALANCE_PID_SPEED_THETA_REF_SLEW_DEG_PER_SEC 20.0f
 #define BALANCE_PID_ANGLE_INTEGRAL_LIMIT_DEG_S 4.0f
 #define BALANCE_PID_BALANCE_SPEED_LIMIT_RPM 320.0f
 #define BALANCE_PID_RUNTIME_SPEED_LIMIT_MIN_RPM 120.0f
-#define BALANCE_PID_ANGLE_KP_RPM_PER_DEG    35.00f
+#define BALANCE_PID_ANGLE_KP_RPM_PER_DEG    150.00f
 #define BALANCE_PID_ANGLE_KI_RPM_PER_DEG_S  0.0f
-#define BALANCE_PID_RATE_KD_RPM_PER_DPS     0.400f
+#define BALANCE_PID_RATE_KD_RPM_PER_DPS     0.900f
 #define BALANCE_POSITION_KP_DEG_PER_M       0.80f
 /*
- * 20:02 数据:巡航段 v 在 ±0.1 打摆(粘滑极限环),Kv=2.5 的 DC 权限
- * 2.5*0.2=0.5deg 顶不进 1.4deg 摩擦带,按 19:44 预案翻倍到 5.0
- * (0.2m/s 误差给 1.0deg;滚动中维持只需 0.2~0.4deg,余量用于破粘滞)。
+ * 21:12 数据:Kv=5.0 越过稳定边界——stop 后 stand 慢速极限环(±0.1m/s
+ * 爬 9s),fwd#3 大激励后速度振荡发散(+0.39<->-0.38)最终 -21deg 向后摔。
+ * 且 5.0 的 DC 权限(1.0deg)仍顶不进 1.4deg 摩擦带:巡航靠 Kv 顶静摩擦
+ * 这条路"要么不稳要么不动"。回撤到 3.0,破摩擦职责移交步态 launch,
+ * Kv 只管滚动段调速与阻尼。
  */
-#define BALANCE_POSITION_KV_DEG_PER_MPS     5.00f
+#define BALANCE_POSITION_KV_DEG_PER_MPS     3.00f
 #define BALANCE_POSITION_KA_DEG_PER_MPS2    0.0f
 /*
  * 行走速度积分:已停用(=0)。14:49 数据证明它与轮速前馈死锁:
@@ -201,6 +204,14 @@
  */
 #define BALANCE_MODE_LAUNCH_BIAS_DEG        2.2f
 #define BALANCE_MODE_LAUNCH_EXIT_MPS        0.15f
+/*
+ * 步态化走路(21:12 决策):launch 顶出楼板 -> 滚动段 Kv 维持 ->
+ * 方向速度低于 RETRIGGER_BELOW 持续 DWELL 秒自动补一发 launch。
+ * launch 空转(车身甩过分离角但轮没破摩擦)也由此自动重试。
+ */
+#define BALANCE_MODE_LAUNCH_RETRIGGER_ENABLE    1U
+#define BALANCE_MODE_LAUNCH_RETRIGGER_BELOW_MPS 0.08f
+#define BALANCE_MODE_LAUNCH_RETRIGGER_DWELL_SEC 0.50f
 #define BALANCE_MODE_DRIVE_USE_ACTUAL_BASE  1U
 #define BALANCE_MODE_DRIVE_THETA_REF_ENABLE 1U
 #define BALANCE_MODE_STOP_BRAKE_ENABLE      1U
@@ -216,8 +227,9 @@
 #define BALANCE_MODE_STOP_BRAKE_LIMIT_RPM   160.0f
 #define BALANCE_MODE_STOP_BRAKE_BALANCE_SCALE 1.0f
 #define BALANCE_MODE_STOP_BRAKE_KV_DEG_PER_MPS 8.0f
-#define BALANCE_MODE_STOP_BRAKE_TREF_LIMIT_DEG 1.0f
+#define BALANCE_MODE_STOP_BRAKE_TREF_LIMIT_DEG 1.3f
 #define BALANCE_MODE_STOP_BRAKE_LOWV_EXIT_SEC  0.15f
+#define BALANCE_MODE_STOP_BRAKE_STAND_ON_MPS   0.04f
 #define BALANCE_MODE_BRAKE_RECOVER_ANGLE_DEG 2.0f
 /*
  * pulse 蠕动关闭:brake_on=0.10m/s 会把车永远压在粘滑楼板(平滑
@@ -379,6 +391,13 @@
  * I4 最后CAN StdId
  * I5 CAN接收总计数
  */
+/* BALANCE_CASCADE compact map:
+ * I0 theta_deg, I1 theta_ref_deg, I2 theta_rate_dps, I3 speed_theta_ref_deg
+ * I4 velocity_mps, I5 balance_ref_rpm
+ * I6 angle_p_ref_rpm, I7 rate_d_ref_rpm
+ * I8 avg_ref_rpm, I9 avg_actual_rpm, I10 avg_cmd_a
+ * I11 fault, I12 chassis_mode
+ */
 #define VOFA_OUTPUT_ENABLE           1
 #define VOFA_OUTPUT_DIVIDER          5U
 #define VOFA_OUTPUT_PERIOD_MS        20U
@@ -395,7 +414,7 @@
 #elif VOFA_DEBUG_STAGE == VOFA_DEBUG_STAGE_IMU_ATTITUDE
 #define VOFA_OUTPUT_CHANNEL_COUNT    8U
 #elif VOFA_DEBUG_STAGE == VOFA_DEBUG_STAGE_BALANCE_CASCADE
-#define VOFA_OUTPUT_CHANNEL_COUNT    16U
+#define VOFA_OUTPUT_CHANNEL_COUNT    13U
 #else
 #define VOFA_OUTPUT_CHANNEL_COUNT    12U
 #endif

@@ -115,9 +115,11 @@ static float balance_last_measured_velocity_mps = 0.0f;
 static float balance_accel_lpf_mps2 = 0.0f;
 static uint8_t balance_accel_lpf_ready = 0U;
 static float balance_speed_integral_m = 0.0f;
+static float balance_speed_theta_ref_slew_deg = 0.0f;
 static uint8_t balance_speed_guard_active = 0U;
 static ChassisMode_e balance_integral_last_mode = CHASSIS_MODE_STAND;
 static float balance_drive_launch_timer_sec = 0.0f;
+static float balance_launch_rearm_timer_sec = 0.0f;
 static float balance_stop_brake_timer_sec = 0.0f;
 static float balance_stop_brake_lowv_timer_sec = 0.0f;
 static float balance_drive_pulse_timer_sec = 0.0f;
@@ -528,8 +530,10 @@ static void Chassis_ResetBalancePid(void)
     balance_position_m = 0.0f;
     balance_position_ref_m = 0.0f;
     balance_speed_integral_m = 0.0f;
+    balance_speed_theta_ref_slew_deg = 0.0f;
     balance_speed_guard_active = 0U;
     balance_drive_launch_timer_sec = 0.0f;
+    balance_launch_rearm_timer_sec = 0.0f;
     balance_stop_brake_timer_sec = 0.0f;
     balance_stop_brake_lowv_timer_sec = 0.0f;
     balance_drive_pulse_timer_sec = 0.0f;
@@ -573,7 +577,9 @@ static void Chassis_ResetModeIntegrator(void)
     balance_position_ref_m = BALANCE_PID_POSITION_SIGN * balance_position_m;
     balance_velocity_ref_ramp_mps = 0.0f;
     balance_speed_integral_m = 0.0f;
+    balance_speed_theta_ref_slew_deg = 0.0f;
     balance_drive_launch_timer_sec = 0.0f;
+    balance_launch_rearm_timer_sec = 0.0f;
     balance_stop_brake_timer_sec = 0.0f;
     balance_stop_brake_lowv_timer_sec = 0.0f;
     balance_drive_pulse_timer_sec = 0.0f;
@@ -1086,6 +1092,33 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
             balance_velocity_ref_ramp_mps = ramp_seed_mps;
         }
     }
+#if BALANCE_MODE_LAUNCH_ENABLE && BALANCE_MODE_LAUNCH_RETRIGGER_ENABLE
+    /*
+     * 步态化走路:launch 顶出楼板 -> 滚动段 Kv 维持 -> 方向速度衰减回
+     * 楼板以下且持续 DWELL 秒,自动补一发 launch。与旧 pulse 蠕动方向
+     * 相反:不是刹进楼板,而是周期性顶出楼板。launch 空转(21:12 fwd#2:
+     * 车身甩过分离角但轮没破摩擦)也由此自动重试。守卫激活期间不重装。
+     */
+    if ((drive_bias_mode != 0U) && (drive_launch_active == 0U) &&
+        (balance_speed_guard_active == 0U)) {
+        float gait_dir_v_mps = (mode_target_velocity_mps >= 0.0f) ?
+                               measured_velocity_mps :
+                               -measured_velocity_mps;
+        if (gait_dir_v_mps < BALANCE_MODE_LAUNCH_RETRIGGER_BELOW_MPS) {
+            balance_launch_rearm_timer_sec += BALANCE_PID_DT_SEC;
+            if (balance_launch_rearm_timer_sec >=
+                BALANCE_MODE_LAUNCH_RETRIGGER_DWELL_SEC) {
+                balance_drive_launch_timer_sec =
+                    BALANCE_MODE_LAUNCH_TIME_SEC;
+                balance_launch_rearm_timer_sec = 0.0f;
+            }
+        } else {
+            balance_launch_rearm_timer_sec = 0.0f;
+        }
+    } else {
+        balance_launch_rearm_timer_sec = 0.0f;
+    }
+#endif
     drive_pulse_brake_active = 0U;
     drive_pulse_hold_active = 0U;
 #if BALANCE_MODE_PULSE_DRIVE_ENABLE
@@ -1160,8 +1193,16 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
      * aref-bref 恒为 0,刹车从未生效)。改为:timer 在 stand 下无条件
      * 递减走完;只有连续低速超过 LOWV_EXIT_SEC 才提前结束窗口;
      * 超角度保护只暂停本拍输出,不摧毁窗口。
-     */
+    */
     stop_brake_active = 0U;
+#if BALANCE_MODE_STOP_BRAKE_ENABLE
+    if ((chassis_mode == CHASSIS_MODE_STAND) &&
+        (Chassis_AbsF(measured_velocity_mps) >=
+         BALANCE_MODE_STOP_BRAKE_STAND_ON_MPS)) {
+        balance_stop_brake_timer_sec = BALANCE_MODE_STOP_BRAKE_TIME_SEC;
+        balance_stop_brake_lowv_timer_sec = 0.0f;
+    }
+#endif
     if ((chassis_mode == CHASSIS_MODE_STAND) &&
         (balance_stop_brake_timer_sec > 0.0f)) {
         balance_stop_brake_timer_sec =
@@ -1283,6 +1324,17 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
         speed_theta_ref_deg += brake_theta_deg;
     }
 #endif
+    if (drive_launch_active != 0U) {
+        balance_speed_theta_ref_slew_deg = speed_theta_ref_deg;
+    } else {
+        balance_speed_theta_ref_slew_deg =
+            Chassis_StepTowards(
+                balance_speed_theta_ref_slew_deg,
+                speed_theta_ref_deg,
+                BALANCE_PID_SPEED_THETA_REF_SLEW_DEG_PER_SEC *
+                BALANCE_PID_DT_SEC);
+        speed_theta_ref_deg = balance_speed_theta_ref_slew_deg;
+    }
 
     theta_ref_deg = balance_manual_bias_deg + mode_bias_deg +
                     speed_theta_ref_deg;

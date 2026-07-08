@@ -563,17 +563,12 @@ void INS_Task(void *argument)
 #else
             float vofa_balance_angle_deg = balance_pid_theta_deg;
             float vofa_balance_angle_reference_deg = balance_pid_theta_ref_deg;
+            float vofa_balance_angle_rate_dps = balance_pid_theta_rate_dps;
             float vofa_speed_angle_reference_deg = balance_pid_speed_theta_ref_deg;
-            float vofa_position_m = balance_pid_position_m;
-            float vofa_accel_mps2 = balance_pid_accel_mps2;
-            float vofa_position_error_m =
-                balance_pid_position_ref_m - balance_pid_position_m;
             float vofa_velocity_mps = balance_pid_velocity_mps;
-            float vofa_velocity_reference_mps =
-                balance_pid_velocity_ref_mps;
-            float vofa_velocity_error_mps =
-                balance_pid_velocity_ref_mps - balance_pid_velocity_mps;
             float vofa_balance_speed_reference_rpm = balance_pid_balance_speed_ref_rpm;
+            float vofa_angle_speed_reference_rpm = balance_pid_angle_speed_ref_rpm;
+            float vofa_rate_speed_reference_rpm = balance_pid_rate_speed_ref_rpm;
             float vofa_average_speed_reference_rpm =
                 0.5f * (wheel_speed_ref_left_rpm + wheel_speed_ref_right_rpm);
             float vofa_average_actual_speed_rpm =
@@ -582,29 +577,24 @@ void INS_Task(void *argument)
                 0.5f * (wheel_speed_output_left_a + wheel_speed_output_right_a);
             float vofa_fault_code = (float)chassis_fault_code;
             float vofa_chassis_mode = (float)chassis_mode;
-            float vofa_zero_trim_deg =
-                balance_pid_zero_trim_deg;
             float vofa_channels[VOFA_OUTPUT_CHANNEL_COUNT] = {
                 vofa_balance_angle_deg,
                 vofa_balance_angle_reference_deg,
+                vofa_balance_angle_rate_dps,
                 vofa_speed_angle_reference_deg,
-                vofa_position_m,
-                vofa_accel_mps2,
-                vofa_position_error_m,
                 vofa_velocity_mps,
-                vofa_velocity_reference_mps,
-                vofa_velocity_error_mps,
                 vofa_balance_speed_reference_rpm,
+                vofa_angle_speed_reference_rpm,
+                vofa_rate_speed_reference_rpm,
                 vofa_average_speed_reference_rpm,
                 vofa_average_actual_speed_rpm,
                 vofa_average_current_command_a,
                 vofa_fault_code,
-                vofa_chassis_mode,
-                vofa_zero_trim_deg
+                vofa_chassis_mode
             };
             if (vofa_header_sent == 0U) {
                 (void)Vofa_SendText(&g_vofa,
-                                    "theta_deg,theta_ref_deg,speed_theta_ref_deg,position_m,accel_mps2,position_error_m,velocity_mps,velocity_ref_mps,velocity_error_mps,balance_ref_rpm,avg_ref_rpm,avg_actual_rpm,avg_cmd_a,fault,chassis_mode,zero_trim_deg\r\n");
+                                    "theta_deg,theta_ref_deg,theta_rate_dps,speed_theta_ref_deg,velocity_mps,balance_ref_rpm,angle_p_ref_rpm,rate_d_ref_rpm,avg_ref_rpm,avg_actual_rpm,avg_cmd_a,fault,chassis_mode\r\n");
                 vofa_header_sent = 1U;
             }
 #endif
