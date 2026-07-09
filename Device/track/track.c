@@ -8,6 +8,17 @@
 
 static Track_Instance *track_bound_inst = NULL;
 
+/* 2026-07-09 VOFA: floor is low ADC, black tape is high ADC. */
+static const uint16_t TRACK_WHITE_BASE[8] = {
+    929, 1210, 1176, 1222, 901, 737, 893, 613
+};
+static const float TRACK_DIFF_THRESHOLD = 400.0f;
+static const float TRACK_BLACK_TOTAL_MIN = 700.0f;
+static const float TRACK_CROSSBAR_RANGE_MAX = 900.0f;
+static const float TRACK_WEIGHTS[8] = {
+    -18.0f, -9.0f, -3.0f, -1.0f, 1.0f, 3.0f, 9.0f, 18.0f
+};
+
 void Track_Init(Track_Instance *inst, Track_UartSend_t send_fn)
 {
     inst->uart_send = send_fn;
@@ -113,33 +124,62 @@ void Track_OnRxByte(uint8_t byte)
 
 float Track_GetError(Track_Instance *inst)
 {
-    /* 探头位置权重 (左正右负) — 边缘探头权重加大 */
-    const float weights[8] = {5.0f, 3.0f, 2.0f, 1.0f, -1.0f, -2.0f, -3.0f, -5.0f};
-
-    /* 纯白底基准值（2026-03-23 实测当前环境白底均值） */
-    const uint16_t WHITE_BASE[8] = {2365, 1808, 1481, 1502, 1569, 1757, 2070, 2523};
-
-    /* 触发阈值：白底漂移约 ±20, 黑线 diff 约 400~650, 设 150 增强灵敏度减少出线 */
-    const float DIFF_THRESHOLD = 150.0f;
-
     float weighted_sum = 0.0f;
     float total_black  = 0.0f;
+    uint16_t min_adc = 0xFFFFU;
+    uint16_t max_adc = 0U;
+    uint8_t black_count = 0U;
 
     for (int i = 0; i < 8; i++) {
         float diff = 0.0f;
-        if (inst->adc_value[i] > WHITE_BASE[i]) {
-            diff = (float)(inst->adc_value[i] - WHITE_BASE[i]);
+        uint16_t adc = inst->adc_value[i];
+
+        if (adc < min_adc) {
+            min_adc = adc;
+        }
+        if (adc > max_adc) {
+            max_adc = adc;
         }
 
-        if (diff > DIFF_THRESHOLD) {
-            weighted_sum += diff * weights[i];
+        if (adc > TRACK_WHITE_BASE[i]) {
+            diff = (float)(adc - TRACK_WHITE_BASE[i]);
+        }
+
+        if (diff > TRACK_DIFF_THRESHOLD) {
+            weighted_sum += diff * TRACK_WEIGHTS[i];
             total_black  += diff;
+            black_count++;
         }
     }
 
-    if (total_black == 0.0f) return TRACK_LOST_LINE;
+    if ((black_count >= 7U) &&
+        ((float)(max_adc - min_adc) < TRACK_CROSSBAR_RANGE_MAX)) {
+        return 0.0f;
+    }
+
+    if (total_black < TRACK_BLACK_TOTAL_MIN) return TRACK_LOST_LINE;
 
     return (weighted_sum / total_black);
+}
+
+uint8_t Track_GetBlackCount(Track_Instance *inst)
+{
+    uint8_t black_count = 0U;
+
+    if (inst == NULL) {
+        return 0U;
+    }
+
+    for (int i = 0; i < 8; i++) {
+        uint16_t adc = inst->adc_value[i];
+
+        if ((adc > TRACK_WHITE_BASE[i]) &&
+            (((float)(adc - TRACK_WHITE_BASE[i])) > TRACK_DIFF_THRESHOLD)) {
+            black_count++;
+        }
+    }
+
+    return black_count;
 }
 
 uint32_t Track_GetFrameCount(const Track_Instance *inst)

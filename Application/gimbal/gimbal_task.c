@@ -988,7 +988,14 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
                 BALANCE_MODE_BIAS_SLEW_DEG_PER_SEC *
                 BALANCE_PID_DT_SEC);
     } else {
-        balance_mode_bias_slew_deg = mode_bias_target_deg;
+        /* 停止拍 bias 不许阶跃:1.7deg 一拍归零 = +170rpm 轮速冲击,
+         * 是停止震动的激励源之一;20deg/s 与 stop-brake 同速。 */
+        balance_mode_bias_slew_deg =
+            Chassis_StepTowards(
+                balance_mode_bias_slew_deg,
+                mode_bias_target_deg,
+                BALANCE_MODE_BIAS_STOP_SLEW_DEG_PER_SEC *
+                BALANCE_PID_DT_SEC);
     }
     mode_bias_deg = balance_mode_bias_slew_deg;
     if (chassis_mode != balance_integral_last_mode) {

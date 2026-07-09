@@ -160,7 +160,7 @@
 #define BALANCE_PID_ANGLE_KP_RPM_PER_DEG    100.00f
 #define BALANCE_PID_ANGLE_KI_RPM_PER_DEG_S  0.0f
 /* 顶部质量升高使摆更慢(自然频率下降),相位裕度变宽,D 小步上调压顶部动量;出现高频细抖先回 0.65 */
-#define BALANCE_PID_RATE_KD_RPM_PER_DPS     0.350f
+#define BALANCE_PID_RATE_KD_RPM_PER_DPS     0.300f
 #define BALANCE_POSITION_KP_DEG_PER_M       0.30f
 /*
  * 21:12 数据:Kv=5.0 越过稳定边界——stop 后 stand 慢速极限环(±0.1m/s
@@ -168,8 +168,11 @@
  * 且 5.0 的 DC 权限(1.0deg)仍顶不进 1.4deg 摩擦带:巡航靠 Kv 顶静摩擦
  * 这条路"要么不稳要么不动"。回撤到 3.0,破摩擦职责移交步态 launch,
  * Kv 只管滚动段调速与阻尼。
+ * 2026-07-09 18:41:翻转后重调曾走 3→12→7→5;停止震动复现 21:12 极限环
+ * 特征(BWD 无 bias 冲击也震),按本注释回 3.0。静立稳(16:37)只证明
+ * 振幅在静摩擦带内,不证明带外稳定,别再以静立数据为由抬 Kv。
  */
-#define BALANCE_POSITION_KV_DEG_PER_MPS     5.00f
+#define BALANCE_POSITION_KV_DEG_PER_MPS     3.00f
 #define BALANCE_POSITION_THETA_REF_LIMIT_DEG 1.60f
 #define BALANCE_POSITION_KA_DEG_PER_MPS2    0.0f
 /*
@@ -206,6 +209,13 @@
 #define BALANCE_MODE_FORWARD_BIAS_DEG       1.7f
 #define BALANCE_MODE_BACKWARD_BIAS_DEG      BALANCE_MODE_STAND_BIAS_DEG
 #define BALANCE_MODE_BIAS_SLEW_DEG_PER_SEC  2.0f
+/*
+ * 2026-07-09 18:41:停止(drive_enabled=0)拍 bias 原来一拍直接归零,
+ * FWD 停止 = theta_ref 1ms 内掉 1.7deg,直立环 Kp=100 即 +170rpm 轮速
+ * 冲击。改走 20deg/s 斜坡(与 stop-brake THETA_SLEW 同速,1.7deg 85ms
+ * 放完),消停止冲击且不拖慢刹车。
+ */
+#define BALANCE_MODE_BIAS_STOP_SLEW_DEG_PER_SEC 20.0f
 #define BALANCE_MODE_LAUNCH_ENABLE          0U
 #define BALANCE_MODE_LAUNCH_TIME_SEC        0.40f
 /*
@@ -295,13 +305,21 @@
  * 首次上电静立 ~1min 内收敛到新零点。收敛后读 I13 zero_trim,
  * 把稳定值并入 BALANCE_ANGLE_OFFSET_DEG 再考虑收回限幅/速率。
  */
+/*
+ * 2026-07-09 16:05 数据:旧门控(v<0.03/轮<5rpm/rate<10dps)开门占空比仅
+ * 18.8%——爬行(v≈0.07,轮≈21rpm)时 v/轮门关死,形成"不停住就不学零点,
+ * 零点不学就停不住"死锁;静立 12Hz 微抖(rate p80=15.4dps)又被 rate 门
+ * 再砍 47%。仿真按旧门积分 -0.226 与实测 trim -0.197 吻合。放宽三个门
+ * (占空比 63.8%)让 trim 在慢速爬行中也能学;θ 门与速率 0.06 不动,
+ * τ≈17s(门内时间)仍与直立环(~1s)解耦。
+ */
 #define BALANCE_ZERO_TRIM_ENABLE            1U
 #define BALANCE_ZERO_TRIM_RATE_PER_SEC      0.06f
 #define BALANCE_ZERO_TRIM_LIMIT_DEG         4.0f
-#define BALANCE_ZERO_TRIM_GATE_V_MPS        0.03f
-#define BALANCE_ZERO_TRIM_GATE_RATE_DPS     10.0f
+#define BALANCE_ZERO_TRIM_GATE_V_MPS        0.15f
+#define BALANCE_ZERO_TRIM_GATE_RATE_DPS     30.0f
 #define BALANCE_ZERO_TRIM_GATE_THETA_DEG    3.0f
-#define BALANCE_ZERO_TRIM_GATE_WHEEL_RPM    5.0f
+#define BALANCE_ZERO_TRIM_GATE_WHEEL_RPM    50.0f
 /*
  * 守卫期间积分向 0 衰减(不是冻结):冻结会让起步攒满的 +1.5deg 积分
  * 在超速时继续同向助推(v=0.4 时速度项 -1.0deg 压不过它,净 +0.5deg)。
@@ -309,21 +327,40 @@
  * 衰减到 0 即停,不会积成反向,windup 保护仍然成立。
  */
 #define BALANCE_SPEED_GUARD_INTEGRAL_DECAY_M_PER_S 0.60f
-#define BALANCE_MODE_TURN_SPEED_RPM         45.0f
+#define BALANCE_MODE_TURN_SPEED_RPM         16.0f
 #define TRACKING_UART_ENABLE                1U
 #define TRACKING_DATA_TIMEOUT_MS            120U
-#define TRACKING_BASE_VELOCITY_MPS          0.08f
+#define TRACKING_BASE_VELOCITY_MPS          0.06f
+#define TRACKING_LOST_HOLD_MS               300U
+#define TRACKING_LOST_HOLD_VELOCITY_MPS     0.04f
+#define TRACKING_LOST_REFIND_MS             1200U
+#define TRACKING_LOST_REFIND_VELOCITY_MPS   0.035f
 #define TRACKING_LOST_VELOCITY_MPS          0.0f
-#define TRACKING_FORWARD_BIAS_DEG           1.2f
-#define TRACKING_TURN_KP_RPM_PER_ERROR      9.0f
+#define TRACKING_FORWARD_BIAS_DEG           0.4f
+#define TRACKING_TURN_KP_RPM_PER_ERROR      12.0f
 #define TRACKING_TURN_KI_RPM_PER_ERROR_S    0.0f
-#define TRACKING_TURN_KD_RPM_PER_ERROR_RATE 0.45f
-#define TRACKING_TURN_LIMIT_RPM             38.0f
+#define TRACKING_TURN_KD_RPM_PER_ERROR_RATE 0.08f
+#define TRACKING_TURN_LIMIT_RPM             24.0f
+#define TRACKING_LOST_HOLD_TURN_RPM         18.0f
+#define TRACKING_LOST_REFIND_TURN_RPM       22.0f
+#define TRACKING_LOST_DEFAULT_TURN_DIR      1.0f
+#define TRACKING_TURN_MEMORY_MIN_RPM        2.0f
 #define TRACKING_ERROR_LPF_ALPHA            0.65f
 #define TRACKING_INTEGRAL_ZONE_ERROR        1.5f
 #define TRACKING_INTEGRAL_LIMIT_ERROR_S     2.0f
 #define TRACKING_INTEGRAL_DECAY             0.80f
 #define TRACKING_CURVE_SLOWDOWN_ERROR       2.0f
+#define TRACKING_SHARP_TURN_ENTER_ERROR     3.0f
+#define TRACKING_SHARP_TURN_EXIT_ERROR      1.2f
+#define TRACKING_SHARP_TURN_GATE_RPM        20.0f
+#define TRACKING_SHARP_TURN_VELOCITY_MPS    0.035f
+#define TRACKING_BLOCK_BLACK_COUNT_MIN      7U
+#define TRACKING_START_BLOCK_CONFIRM_MS     250U
+#define TRACKING_START_BLOCK_EXIT_MS        300U
+#define TRACKING_TARGET_BLOCK_CONFIRM_MS    220U
+#define TRACKING_TARGET_BLOCK_RUNOUT_MS     500U
+#define TRACKING_TARGET_BLOCK_RUNOUT_VELOCITY_MPS 0.04f
+#define TRACKING_TARGET_BLOCK_STOP_MS       3000U
 #define TRACKING_LOST_ERROR                 7.5f
 #define TRACKING_MIN_SPEED_RATIO            0.45f
 #define TRACKING_LOST_TURN_DECAY            0.85f
@@ -393,8 +430,11 @@
  * 若下次又漂,不要再重烧固件追常数:开机后用 B 命令做会话级 trim,
  * 或实现 stand 模式下的慢速零点自学习。
  * 2026-07-09 整车正方向翻转:θ = accel_raw×SIGN − OFFSET,SIGN 取反后
- * OFFSET 必须同步取反(-1.2 -> +1.2),物理平衡点才落回 θ≈0。 */
-#define BALANCE_ANGLE_OFFSET_DEG     (1.2f)
+ * OFFSET 必须同步取反(-1.2 -> +1.2),物理平衡点才落回 θ≈0。
+ * 2026-07-09 16:05 数据:stand 匀速爬行 +0.072m/s、爬行段 θ 均值 -0.69,
+ * 即零点还差 ~0.9deg(已学 trim -0.197 + 残差 -0.69)。按既定流程把
+ * 稳定值并回:1.2 - 0.197 - 0.69 ≈ 0.35,残差交给放宽门控后的 trim。 */
+#define BALANCE_ANGLE_OFFSET_DEG     (0.35f)
 /* Balance car must not treat power-on pose as zero. Use fixed mechanical offset only. */
 #define BALANCE_BOOT_ZERO_ENABLE     0
 
@@ -459,7 +499,7 @@
 #define VOFA_DEBUG_STAGE_SPEED_LOOP     2U
 #define VOFA_DEBUG_STAGE_BALANCE_CASCADE 3U
 #define VOFA_DEBUG_STAGE_TRACK_ADC      4U
-#define VOFA_DEBUG_STAGE                VOFA_DEBUG_STAGE_BALANCE_CASCADE
+#define VOFA_DEBUG_STAGE                VOFA_DEBUG_STAGE_TRACK_ADC
 #if VOFA_OUTPUT_MODE == VOFA_OUTPUT_MODE_ENCODER
 #if VOFA_DEBUG_STAGE == VOFA_DEBUG_STAGE_MOTOR_FEEDBACK
 #define VOFA_OUTPUT_CHANNEL_COUNT    12U
@@ -468,7 +508,7 @@
 #elif VOFA_DEBUG_STAGE == VOFA_DEBUG_STAGE_IMU_ATTITUDE
 #define VOFA_OUTPUT_CHANNEL_COUNT    8U
 #elif VOFA_DEBUG_STAGE == VOFA_DEBUG_STAGE_TRACK_ADC
-#define VOFA_OUTPUT_CHANNEL_COUNT    8U
+#define VOFA_OUTPUT_CHANNEL_COUNT    16U
 #elif VOFA_DEBUG_STAGE == VOFA_DEBUG_STAGE_BALANCE_CASCADE
 #define VOFA_OUTPUT_CHANNEL_COUNT    16U
 #else

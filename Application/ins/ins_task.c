@@ -565,6 +565,9 @@ void INS_Task(void *argument)
                 vofa_header_sent = 1U;
             }
 #elif VOFA_DEBUG_STAGE == VOFA_DEBUG_STAGE_TRACK_ADC
+            float vofa_track_error = Track_GetError(&g_track);
+            ModeCommand_t vofa_mode_command;
+            Mode_GetCommand(&vofa_mode_command);
             float vofa_channels[VOFA_OUTPUT_CHANNEL_COUNT] = {
                 (float)Track_GetADC(&g_track, 0U),
                 (float)Track_GetADC(&g_track, 1U),
@@ -573,11 +576,19 @@ void INS_Task(void *argument)
                 (float)Track_GetADC(&g_track, 4U),
                 (float)Track_GetADC(&g_track, 5U),
                 (float)Track_GetADC(&g_track, 6U),
-                (float)Track_GetADC(&g_track, 7U)
+                (float)Track_GetADC(&g_track, 7U),
+                vofa_track_error,
+                (vofa_track_error == TRACK_LOST_LINE) ? 1.0f : 0.0f,
+                (float)chassis_mode,
+                vofa_mode_command.velocity_mps,
+                vofa_mode_command.turn_rpm,
+                balance_pid_velocity_mps,
+                balance_pid_velocity_ref_mps,
+                balance_pid_velocity_ref_mps - balance_pid_velocity_mps
             };
             if (vofa_header_sent == 0U) {
                 (void)Vofa_SendText(&g_vofa,
-                                    "track_x1_adc,track_x2_adc,track_x3_adc,track_x4_adc,track_x5_adc,track_x6_adc,track_x7_adc,track_x8_adc\r\n");
+                                    "track_x1_adc,track_x2_adc,track_x3_adc,track_x4_adc,track_x5_adc,track_x6_adc,track_x7_adc,track_x8_adc,track_error,lost,chassis_mode,cmd_velocity_mps,turn_rpm,actual_velocity_mps,ref_velocity_mps,velocity_err_mps\r\n");
                 vofa_header_sent = 1U;
             }
 #else
@@ -688,9 +699,12 @@ void BT_RxTask(void *argument)
 #if TRACKING_UART_ENABLE
         if (g_track.data_ready != 0U) {
             float track_error;
+            uint8_t black_count;
             g_track.data_ready = 0U;
             track_error = Track_GetError(&g_track);
-            Mode_TrackingSetError(track_error, (uint32_t)xTaskGetTickCount());
+            black_count = Track_GetBlackCount(&g_track);
+            Mode_TrackingSetError(track_error, black_count,
+                                  (uint32_t)xTaskGetTickCount());
         }
 #endif
 

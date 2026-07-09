@@ -8,6 +8,7 @@
 static ChassisMode_e mode_active = CHASSIS_MODE_STAND;
 static ModeCommand_t mode_command;
 static float tracking_error = TRACK_LOST_LINE;
+static uint8_t tracking_black_count = 0U;
 static uint8_t tracking_seen = 0U;
 static uint32_t tracking_update_ms = 0U;
 static uint32_t mode_last_update_ms = 0U;
@@ -29,6 +30,7 @@ void Mode_Init(void)
     Mode_CommandClear(&mode_command);
     mode_active = CHASSIS_MODE_STAND;
     tracking_error = TRACK_LOST_LINE;
+    tracking_black_count = 0U;
     tracking_seen = 0U;
     tracking_update_ms = 0U;
     mode_last_update_ms = 0U;
@@ -97,7 +99,8 @@ void Mode_Update(uint32_t now_ms)
              ((uint32_t)(now_ms - tracking_update_ms) <=
               TRACKING_DATA_TIMEOUT_MS)) ? 1U : 0U;
         error = sensor_fresh ? tracking_error : TRACK_LOST_LINE;
-        Mode_TrackingBuild(&command, error, sensor_fresh, dt_sec);
+        Mode_TrackingBuild(&command, error, tracking_black_count,
+                           sensor_fresh, dt_sec);
         break;
     case CHASSIS_MODE_STAND:
     default:
@@ -116,9 +119,10 @@ void Mode_GetCommand(ModeCommand_t *command)
     *command = mode_command;
 }
 
-void Mode_TrackingSetError(float error, uint32_t now_ms)
+void Mode_TrackingSetError(float error, uint8_t black_count, uint32_t now_ms)
 {
     tracking_error = error;
+    tracking_black_count = black_count;
     tracking_update_ms = now_ms;
     tracking_seen = 1U;
 }

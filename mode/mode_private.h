@@ -12,6 +12,7 @@ void Mode_TurnLeftBuild(ModeCommand_t *command);
 void Mode_TurnRightBuild(ModeCommand_t *command);
 void Mode_TrackingBuild(ModeCommand_t *command,
                         float error,
+                        uint8_t black_count,
                         uint8_t sensor_fresh,
                         float dt_sec);
 void Mode_TrackingReset(void);

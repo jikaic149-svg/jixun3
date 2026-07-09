@@ -17,6 +17,6 @@ void Mode_Set(ChassisMode_e mode);
 ChassisMode_e Mode_Get(void);
 void Mode_Update(uint32_t now_ms);
 void Mode_GetCommand(ModeCommand_t *command);
-void Mode_TrackingSetError(float error, uint32_t now_ms);
+void Mode_TrackingSetError(float error, uint8_t black_count, uint32_t now_ms);
 
 #endif /* MODE_CONTROL_H */

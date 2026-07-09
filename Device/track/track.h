@@ -47,6 +47,7 @@ void Track_OnRxByte(uint8_t byte);
  * @return 偏差值 (>0 线在左, <0 线在右, 999.0 丢线)
  */
 float Track_GetError(Track_Instance *inst);
+uint8_t Track_GetBlackCount(Track_Instance *inst);
 uint32_t Track_GetFrameCount(const Track_Instance *inst);
 uint32_t Track_GetRxByteCount(const Track_Instance *inst);
 
