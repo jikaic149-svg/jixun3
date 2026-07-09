@@ -33,7 +33,9 @@ C_INCLUDES = \
 -IDevice/bmi088 \
 -IDevice/bluetooth \
 -IDevice/vision \
+-IDevice/track \
 -IDevice/vofa \
+-Imode \
 -IApplication/algorithm \
 -IApplication/ins \
 -IApplication/gimbal \
@@ -62,7 +64,15 @@ bsp/bsp_can.c \
 Device/bmi088/bmi088.c \
 Device/bluetooth/bluetooth.c \
 Device/vision/vision.c \
+Device/track/track.c \
 Device/vofa/vofa.c \
+mode/mode_control.c \
+mode/mode_stop.c \
+mode/mode_forward.c \
+mode/mode_backward.c \
+mode/mode_turn_left.c \
+mode/mode_turn_right.c \
+mode/mode_tracking.c \
 Application/algorithm/attitude_algorithm.c \
 Application/algorithm/crc16.c \
 Application/algorithm/adrc_eso.c \
@@ -107,19 +117,27 @@ CFLAGS = $(MCU) $(C_DEFS) $(C_INCLUDES) $(OPT) -Wall -fdata-sections -ffunction-
 ASFLAGS = $(MCU) $(C_DEFS) $(C_INCLUDES) $(OPT) -Wall -fdata-sections -ffunction-sections -g -gdwarf-2
 LDFLAGS = $(MCU) -specs=nano.specs -T$(LDSCRIPT) -Wl,-Map=$(BUILD_DIR)/$(TARGET).map,--cref -Wl,--gc-sections -lc -lm -lnosys
 
-OBJECTS = $(addprefix $(BUILD_DIR)/,$(notdir $(C_SOURCES:.c=.o)))
-vpath %.c $(sort $(dir $(C_SOURCES)))
-OBJECTS += $(addprefix $(BUILD_DIR)/,$(notdir $(ASM_SOURCES:.s=.o)))
-vpath %.s $(sort $(dir $(ASM_SOURCES)))
+source_to_object = $(BUILD_DIR)/$(subst /,_,$(basename $(1))).o
+source_to_list = $(BUILD_DIR)/$(subst /,_,$(basename $(1))).lst
+
+OBJECTS = $(foreach src,$(C_SOURCES),$(call source_to_object,$(src)))
+OBJECTS += $(foreach src,$(ASM_SOURCES),$(call source_to_object,$(src)))
 DEPS = $(OBJECTS:.o=.d)
 
 all: $(BUILD_DIR)/$(TARGET).elf $(BUILD_DIR)/$(TARGET).hex $(BUILD_DIR)/$(TARGET).bin
 
-$(BUILD_DIR)/%.o: %.c Makefile | $(BUILD_DIR)
-	$(CC) -c $(CFLAGS) -Wa,-a,-ad,-alms=$(BUILD_DIR)/$(notdir $(<:.c=.lst)) $< -o $@
+define COMPILE_C_RULE
+$(call source_to_object,$(1)): $(1) Makefile | $(BUILD_DIR)
+	$$(CC) -c $$(CFLAGS) -Wa,-a,-ad,-alms=$(call source_to_list,$(1)) $$< -o $$@
+endef
 
-$(BUILD_DIR)/%.o: %.s Makefile | $(BUILD_DIR)
-	$(AS) -c $(ASFLAGS) $< -o $@
+define COMPILE_ASM_RULE
+$(call source_to_object,$(1)): $(1) Makefile | $(BUILD_DIR)
+	$$(AS) -c $$(ASFLAGS) $$< -o $$@
+endef
+
+$(foreach src,$(C_SOURCES),$(eval $(call COMPILE_C_RULE,$(src))))
+$(foreach src,$(ASM_SOURCES),$(eval $(call COMPILE_ASM_RULE,$(src))))
 
 $(BUILD_DIR)/$(TARGET).elf: $(OBJECTS) Makefile
 	$(CC) $(OBJECTS) $(LDFLAGS) -o $@

@@ -340,7 +340,7 @@
               <MiscControls></MiscControls>
               <Define>USE_HAL_DRIVER,STM32F407xx,BMI088_USE_SPI</Define>
               <Undefine></Undefine>
-              <IncludePath>../Inc;../Drivers/STM32F4xx_HAL_Driver/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32F4xx/Include;../Drivers/CMSIS/Include;../BSP;../Device/bmi088;../Device/bluetooth;../Device/vision;../Device/vofa;../Application/algorithm;../Application/ins;../Application/gimbal;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS</IncludePath>
+              <IncludePath>../Inc;../Drivers/STM32F4xx_HAL_Driver/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32F4xx/Include;../Drivers/CMSIS/Include;../BSP;../Device/bmi088;../Device/bluetooth;../Device/vision;../Device/track;../Device/vofa;../mode;../Application/algorithm;../Application/ins;../Application/gimbal;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -595,9 +595,54 @@
               <FilePath>../Device/vision/vision.c</FilePath>
             </File>
             <File>
+              <FileName>track.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Device/track/track.c</FilePath>
+            </File>
+            <File>
               <FileName>vofa.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Device/vofa/vofa.c</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>mode</GroupName>
+          <Files>
+            <File>
+              <FileName>mode_control.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../mode/mode_control.c</FilePath>
+            </File>
+            <File>
+              <FileName>mode_stop.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../mode/mode_stop.c</FilePath>
+            </File>
+            <File>
+              <FileName>mode_forward.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../mode/mode_forward.c</FilePath>
+            </File>
+            <File>
+              <FileName>mode_backward.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../mode/mode_backward.c</FilePath>
+            </File>
+            <File>
+              <FileName>mode_turn_left.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../mode/mode_turn_left.c</FilePath>
+            </File>
+            <File>
+              <FileName>mode_turn_right.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../mode/mode_turn_right.c</FilePath>
+            </File>
+            <File>
+              <FileName>mode_tracking.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../mode/mode_tracking.c</FilePath>
             </File>
           </Files>
         </Group>

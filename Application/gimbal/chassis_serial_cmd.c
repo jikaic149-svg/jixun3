@@ -138,7 +138,7 @@ static uint8_t cmd_parse_bias(const uint8_t *line, uint8_t len, float *bias_deg)
 
 static uint8_t cmd_mode_from_digit(uint8_t c, ChassisMode_e *mode)
 {
-    if ((mode == 0) || (c < '0') || (c > '4')) {
+    if ((mode == 0) || (c < '0') || (c > '5')) {
         return 0U;
     }
 
@@ -182,6 +182,12 @@ static uint8_t cmd_mode_from_word(const uint8_t *line,
     }
     if (cmd_match_word(line, len, start, "right") != 0U) {
         *mode = CHASSIS_MODE_TURN_RIGHT;
+        return 1U;
+    }
+    if ((cmd_match_word(line, len, start, "track") != 0U) ||
+        (cmd_match_word(line, len, start, "tracking") != 0U) ||
+        (cmd_match_word(line, len, start, "line") != 0U)) {
+        *mode = CHASSIS_MODE_TRACKING;
         return 1U;
     }
 

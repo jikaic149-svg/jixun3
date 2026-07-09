@@ -78,11 +78,13 @@
 #define RIGHT_WHEEL_LIMIT_SPEED_RPM  500.0f
 #define RIGHT_WHEEL_LIMIT_CURRENT_A  1.65f
 
-/* 轮端方向归一化：正方向定义为车体前进。右轮实测极性相反。 */
-#define LEFT_WHEEL_FEEDBACK_SIGN      (-1.0f)
-#define RIGHT_WHEEL_FEEDBACK_SIGN     1.0f
-#define LEFT_WHEEL_CURRENT_SIGN       (-1.0f)
-#define RIGHT_WHEEL_CURRENT_SIGN      1.0f
+/* 轮端方向归一化：正方向定义为车体前进。
+ * 2026-07-09 整车正方向翻转(原正->负):左右轮反馈/电流符号同时取反,
+ * 反馈与电流必须成对翻,否则轮速内环变正反馈。 */
+#define LEFT_WHEEL_FEEDBACK_SIGN      1.0f
+#define RIGHT_WHEEL_FEEDBACK_SIGN     (-1.0f)
+#define LEFT_WHEEL_CURRENT_SIGN       1.0f
+#define RIGHT_WHEEL_CURRENT_SIGN      (-1.0f)
 
 /* 无刷启动流程：CAN启动后先enable左右轮，任务内发送0A保活并检测反馈。 */
 #define WHEEL_FEEDBACK_TIMEOUT_MS     100U
@@ -110,7 +112,9 @@
 #define LEFT_WHEEL_SPEED_PID_POLARITY       WHEEL_SPEED_PID_POLARITY
 #define RIGHT_WHEEL_SPEED_PID_POLARITY      WHEEL_SPEED_PID_POLARITY
 #define WHEEL_SPEED_PID_INTEGRAL_LIMIT      120.0f
-#define WHEEL_SPEED_FF_STATIC_A             0.018f
+/* 整车变重后正压力增大,破静摩擦电流同步上调约 20% */
+#define WHEEL_SPEED_FF_STATIC_A             0.022f
+#define WHEEL_SPEED_FF_STATIC_RAMP_RPM      30.0f
 #define WHEEL_SPEED_FF_KV_A_PER_RPM         0.00015f
 #define WHEEL_SPEED_FF_DISABLE_WHEN_BRAKING 1U
 #define LEFT_WHEEL_SPEED_FEEDBACK_LPF_ALPHA 0.20f
@@ -138,7 +142,8 @@
 #define CHASSIS_FAULT_PID_ANGLE             3U
 #define CHASSIS_FAULT_PID_RATE              4U
 #define BALANCE_PID_DT_SEC                  (0.001f * (float)WHEEL_SAFE_TASK_PERIOD_MS)
-#define BALANCE_PID_CURRENT_LIMIT_A         0.40f
+/* 加装相机/激光笔后 m·g·h 上升,同角度误差需要更大力矩;电机限 1.65A,余量充足 */
+#define BALANCE_PID_CURRENT_LIMIT_A         0.50f
 #define BALANCE_PID_CURRENT_SLEW_A_PER_SEC  60.0f
 #define BALANCE_PID_SAFE_ANGLE_DEG          30.0f
 #define BALANCE_PID_SAFE_RATE_DPS           600.0f
@@ -146,15 +151,17 @@
 #define BALANCE_PID_VELOCITY_LPF_ALPHA      0.15f
 #define BALANCE_PID_VELOCITY_LIMIT_MPS      1.5f
 #define BALANCE_PID_THETA_REF_DEG           0.0f
-#define BALANCE_PID_THETA_REF_LIMIT_DEG     3.0f
+#define BALANCE_PID_THETA_REF_LIMIT_DEG     3.2f
 #define BALANCE_PID_SPEED_THETA_REF_SLEW_DEG_PER_SEC 20.0f
 #define BALANCE_PID_ANGLE_INTEGRAL_LIMIT_DEG_S 4.0f
 #define BALANCE_PID_BALANCE_SPEED_LIMIT_RPM 320.0f
+#define BALANCE_PID_STAND_SPEED_LIMIT_RPM   220.0f
 #define BALANCE_PID_RUNTIME_SPEED_LIMIT_MIN_RPM 120.0f
-#define BALANCE_PID_ANGLE_KP_RPM_PER_DEG    150.00f
+#define BALANCE_PID_ANGLE_KP_RPM_PER_DEG    100.00f
 #define BALANCE_PID_ANGLE_KI_RPM_PER_DEG_S  0.0f
-#define BALANCE_PID_RATE_KD_RPM_PER_DPS     0.900f
-#define BALANCE_POSITION_KP_DEG_PER_M       0.80f
+/* 顶部质量升高使摆更慢(自然频率下降),相位裕度变宽,D 小步上调压顶部动量;出现高频细抖先回 0.65 */
+#define BALANCE_PID_RATE_KD_RPM_PER_DPS     0.350f
+#define BALANCE_POSITION_KP_DEG_PER_M       0.30f
 /*
  * 21:12 数据:Kv=5.0 越过稳定边界——stop 后 stand 慢速极限环(±0.1m/s
  * 爬 9s),fwd#3 大激励后速度振荡发散(+0.39<->-0.38)最终 -21deg 向后摔。
@@ -162,7 +169,8 @@
  * 这条路"要么不稳要么不动"。回撤到 3.0,破摩擦职责移交步态 launch,
  * Kv 只管滚动段调速与阻尼。
  */
-#define BALANCE_POSITION_KV_DEG_PER_MPS     3.00f
+#define BALANCE_POSITION_KV_DEG_PER_MPS     5.00f
+#define BALANCE_POSITION_THETA_REF_LIMIT_DEG 1.60f
 #define BALANCE_POSITION_KA_DEG_PER_MPS2    0.0f
 /*
  * 行走速度积分:已停用(=0)。14:49 数据证明它与轮速前馈死锁:
@@ -175,7 +183,11 @@
 #define BALANCE_PID_KALMAN_ANGLE_WEIGHT     1.0f
 #define BALANCE_PID_ACCEL_ANGLE_WEIGHT      0.0f
 #define BALANCE_PID_WHEEL_SPEED_DEADBAND_MPS 0.010f
-#define BALANCE_MODE_VELOCITY_RAMP_MPS_PER_SEC 0.08f
+#define BALANCE_MODE_VELOCITY_RAMP_MPS_PER_SEC 0.15f
+#define BALANCE_MODE_DRIVE_SPEED_KP_DEG_PER_MPS 15.00f
+#define BALANCE_MODE_DRIVE_SPEED_KI_DEG_PER_M_S 0.80f
+#define BALANCE_MODE_DRIVE_SPEED_INTEGRAL_LIMIT_M_S 0.50f
+#define BALANCE_MODE_DRIVE_THETA_REF_LIMIT_DEG 1.60f
 /*
  * 前进/后退不再使用固定开环 bias(巡航速度 = (bias-摩擦角-零点误差)/Kv,
  * 摩擦(±1.4deg)和零点漂移都比 bias 本身大,只能"不走或冲")。
@@ -190,10 +202,11 @@
  * 维持巡航;斜坡在 launch 结束时用实测速度接力(gimbal_task.c),
  * 不再从 0 重爬把车刹回坑里。bias 全部回真实平衡点 -0.8。
  */
-#define BALANCE_MODE_STAND_BIAS_DEG         (-0.8f)
-#define BALANCE_MODE_FORWARD_BIAS_DEG       (-0.8f)
-#define BALANCE_MODE_BACKWARD_BIAS_DEG      (-0.8f)
-#define BALANCE_MODE_LAUNCH_ENABLE          1U
+#define BALANCE_MODE_STAND_BIAS_DEG         0.0f
+#define BALANCE_MODE_FORWARD_BIAS_DEG       1.7f
+#define BALANCE_MODE_BACKWARD_BIAS_DEG      BALANCE_MODE_STAND_BIAS_DEG
+#define BALANCE_MODE_BIAS_SLEW_DEG_PER_SEC  2.0f
+#define BALANCE_MODE_LAUNCH_ENABLE          0U
 #define BALANCE_MODE_LAUNCH_TIME_SEC        0.40f
 /*
  * 19:44 数据:bias=1.0 时车身干净追到 +0.28(相对平衡点仅 ~1.1deg),
@@ -209,14 +222,15 @@
  * 方向速度低于 RETRIGGER_BELOW 持续 DWELL 秒自动补一发 launch。
  * launch 空转(车身甩过分离角但轮没破摩擦)也由此自动重试。
  */
-#define BALANCE_MODE_LAUNCH_RETRIGGER_ENABLE    1U
+#define BALANCE_MODE_LAUNCH_RETRIGGER_ENABLE    0U
 #define BALANCE_MODE_LAUNCH_RETRIGGER_BELOW_MPS 0.08f
 #define BALANCE_MODE_LAUNCH_RETRIGGER_DWELL_SEC 0.50f
-#define BALANCE_MODE_DRIVE_USE_ACTUAL_BASE  1U
+#define BALANCE_MODE_DRIVE_USE_ACTUAL_BASE  0U
 #define BALANCE_MODE_DRIVE_THETA_REF_ENABLE 1U
 #define BALANCE_MODE_STOP_BRAKE_ENABLE      1U
 #define BALANCE_MODE_STOP_BRAKE_TIME_SEC    0.80f
-#define BALANCE_MODE_STOP_BRAKE_OFF_MPS     0.02f
+#define BALANCE_MODE_STOP_BRAKE_LOCK_ON_MPS 0.10f
+#define BALANCE_MODE_STOP_BRAKE_OFF_MPS     0.05f
 /*
  * 20:02 数据:轮级反向刹车(GAIN 2.0 + 直立环 0.25 折)一次都没生效——
  * 旧激活逻辑被速度噪声(±0.03)一拍抖穿即永久清 timer。修复窗口逻辑
@@ -226,11 +240,17 @@
 #define BALANCE_MODE_STOP_BRAKE_GAIN        0.0f
 #define BALANCE_MODE_STOP_BRAKE_LIMIT_RPM   160.0f
 #define BALANCE_MODE_STOP_BRAKE_BALANCE_SCALE 1.0f
-#define BALANCE_MODE_STOP_BRAKE_KV_DEG_PER_MPS 8.0f
-#define BALANCE_MODE_STOP_BRAKE_TREF_LIMIT_DEG 1.3f
+#define BALANCE_MODE_STOP_BRAKE_KV_DEG_PER_MPS 6.0f
+#define BALANCE_MODE_STOP_BRAKE_TREF_LIMIT_DEG 0.9f
+#define BALANCE_MODE_STOP_BRAKE_STAND_TREF_LIMIT_DEG 1.9f
+#define BALANCE_MODE_STOP_BRAKE_THETA_SLEW_DEG_PER_SEC 20.0f
+#define BALANCE_MODE_STOP_BRAKE_STAND_SPEED_LIMIT_RPM 280.0f
+#define BALANCE_MODE_STOP_BRAKE_CURRENT_LIMIT_A 0.50f
+#define BALANCE_MODE_STOP_BRAKE_CURRENT_SLEW_A_PER_SEC 60.0f
 #define BALANCE_MODE_STOP_BRAKE_LOWV_EXIT_SEC  0.15f
-#define BALANCE_MODE_STOP_BRAKE_STAND_ON_MPS   0.04f
-#define BALANCE_MODE_BRAKE_RECOVER_ANGLE_DEG 2.0f
+#define BALANCE_MODE_STOP_BRAKE_REVERSE_EXIT_MPS 0.08f
+#define BALANCE_MODE_STOP_BRAKE_TRACK_ERR_DEG 1.2f
+#define BALANCE_MODE_BRAKE_RECOVER_ANGLE_DEG 6.0f
 /*
  * pulse 蠕动关闭:brake_on=0.10m/s 会把车永远压在粘滑楼板(平滑
  * 滚动窗口 0.15~0.35m/s)以下,和 15:23 的摩擦结论自相矛盾。
@@ -249,7 +269,7 @@
  * 0.06m/s(18rpm) 在楼板以下,表现只能是"不动或窜";
  * 0.20m/s(62rpm) 在窗口中间,且是轮速内环验证过的舒适区。
  */
-#define BALANCE_MODE_DRIVE_VELOCITY_MPS     0.20f
+#define BALANCE_MODE_DRIVE_VELOCITY_MPS     0.12f
 /*
  * 闭环限速守卫:|v| 超过 ON 阈值时把速度目标强制为 0(撤销前进指令,
  * 全部外环权限用于刹车),并冻结速度积分;低于 OFF 阈值恢复。带迟滞防抖。
@@ -257,7 +277,8 @@
  * 且轮速上限 320rpm≈1.04m/s 吃不起非最小相位刹车瞬态,属不可回收区。
  * 只修改外环速度目标,不触碰直立角度环任何量。
  */
-#define BALANCE_SPEED_GUARD_ON_MPS          0.40f
+/* 变重变高后同速度动能/回收难度更大,守卫提前;07-07 曾两次 0.383 擦线未触发 */
+#define BALANCE_SPEED_GUARD_ON_MPS          0.35f
 #define BALANCE_SPEED_GUARD_OFF_MPS         0.15f
 /*
  * 零点自学习:静止直立时车实际站住的角度就是物理零点(定义如此),
@@ -267,9 +288,16 @@
  * 被推/行走/摔倒全部冻结。与直立环时间尺度差 ~50 倍,动力学解耦。
  * 学到的 trim 只在 RAM,掉电回到 BALANCE_ANGLE_OFFSET_DEG 基准。
  */
+/*
+ * 2026-07-09 硬件变更:车后方加循迹模块(低位悬臂)、云台上方加
+ * MaixCAM 2 相机+激光笔。重心前后偏移量未知,可能超出旧 ±2deg
+ * 权限;放宽限幅到 ±4deg 并把学习速率提到 0.06(时间常数 ~17s),
+ * 首次上电静立 ~1min 内收敛到新零点。收敛后读 I13 zero_trim,
+ * 把稳定值并入 BALANCE_ANGLE_OFFSET_DEG 再考虑收回限幅/速率。
+ */
 #define BALANCE_ZERO_TRIM_ENABLE            1U
-#define BALANCE_ZERO_TRIM_RATE_PER_SEC      0.02f
-#define BALANCE_ZERO_TRIM_LIMIT_DEG         2.0f
+#define BALANCE_ZERO_TRIM_RATE_PER_SEC      0.06f
+#define BALANCE_ZERO_TRIM_LIMIT_DEG         4.0f
 #define BALANCE_ZERO_TRIM_GATE_V_MPS        0.03f
 #define BALANCE_ZERO_TRIM_GATE_RATE_DPS     10.0f
 #define BALANCE_ZERO_TRIM_GATE_THETA_DEG    3.0f
@@ -282,11 +310,31 @@
  */
 #define BALANCE_SPEED_GUARD_INTEGRAL_DECAY_M_PER_S 0.60f
 #define BALANCE_MODE_TURN_SPEED_RPM         45.0f
+#define TRACKING_UART_ENABLE                1U
+#define TRACKING_DATA_TIMEOUT_MS            120U
+#define TRACKING_BASE_VELOCITY_MPS          0.08f
+#define TRACKING_LOST_VELOCITY_MPS          0.0f
+#define TRACKING_FORWARD_BIAS_DEG           1.2f
+#define TRACKING_TURN_KP_RPM_PER_ERROR      9.0f
+#define TRACKING_TURN_KI_RPM_PER_ERROR_S    0.0f
+#define TRACKING_TURN_KD_RPM_PER_ERROR_RATE 0.45f
+#define TRACKING_TURN_LIMIT_RPM             38.0f
+#define TRACKING_ERROR_LPF_ALPHA            0.65f
+#define TRACKING_INTEGRAL_ZONE_ERROR        1.5f
+#define TRACKING_INTEGRAL_LIMIT_ERROR_S     2.0f
+#define TRACKING_INTEGRAL_DECAY             0.80f
+#define TRACKING_CURVE_SLOWDOWN_ERROR       2.0f
+#define TRACKING_LOST_ERROR                 7.5f
+#define TRACKING_MIN_SPEED_RATIO            0.45f
+#define TRACKING_LOST_TURN_DECAY            0.85f
 #define BALANCE_PID_POLARITY                1.0f
 #define BALANCE_PID_POSITION_SIGN           1.0f
 #define BALANCE_PID_VELOCITY_SIGN           1.0f
-#define BALANCE_PID_LEFT_YAW_SIGN           (-1.0f)
-#define BALANCE_PID_RIGHT_YAW_SIGN          1.0f
+/* 2026-07-09 整车正方向翻转:轮子电流/反馈符号取反后,为保持
+ * turn>0 对应的物理旋转方向不变(yaw 陀螺约定未动,左转语义不随
+ * 车头翻转而变),左右差速符号必须跟着轮极性一起取反。 */
+#define BALANCE_PID_LEFT_YAW_SIGN           1.0f
+#define BALANCE_PID_RIGHT_YAW_SIGN          (-1.0f)
 #define BALANCE_MANUAL_BIAS_LIMIT_DEG       2.0f
 #define BALANCE_WHEEL_RADIUS_M              0.031f
 #define BALANCE_RPM_TO_MPS                  \
@@ -313,14 +361,17 @@
 #define BALANCE_ACCEL_ANGLE_ROLL     0
 #define BALANCE_ACCEL_ANGLE_PITCH    1
 
-/* 当前板子安装方向：前后平衡角落在 Roll / X gyro 上。 */
+/* 当前板子安装方向：前后平衡角落在 Roll / X gyro 上。
+ * 2026-07-09 整车正方向翻转:加速度角符号取反(原 -1 -> +1)。 */
 #define BALANCE_ACCEL_ANGLE_MODE     BALANCE_ACCEL_ANGLE_ROLL
-#define BALANCE_ACCEL_ANGLE_SIGN     (-1.0f)
+#define BALANCE_ACCEL_ANGLE_SIGN     1.0f
 #define BALANCE_GYRO_AXIS            BALANCE_AXIS_X
 /* 实测（电机断开、手动晃车段）d(accel_angle)/dt = -1.08 × gyro_rate：
- * 加速度角与陀螺仪对同一倾倒方向的符号相反。保持加速度角符号不动
- * （救车方向极性是按它验证的），翻转陀螺仪符号使两源一致。 */
-#define BALANCE_GYRO_SIGN            (-1.0f)
+ * 加速度角与陀螺仪对同一倾倒方向的符号相反,陀螺符号须与加速度角
+ * 符号保持"相反"关系才能两源一致。
+ * 2026-07-09 整车正方向翻转:加速度角与陀螺符号同步取反(-1 -> +1),
+ * 两源相对关系不变。 */
+#define BALANCE_GYRO_SIGN            1.0f
 
 /* yaw 只用于底盘航向估计，现场如果方向反了只改符号。 */
 #define CHASSIS_YAW_GYRO_AXIS        BALANCE_AXIS_Z
@@ -340,8 +391,10 @@
  *   上午数据(offset=-2.5 时代)零点在显示 +2.0deg -> 改 -0.5f;
  *   下午现场(offset=-0.5 时代)需要 B-1.5 才立得住 -> 改 -2.0f。
  * 若下次又漂,不要再重烧固件追常数:开机后用 B 命令做会话级 trim,
- * 或实现 stand 模式下的慢速零点自学习。 */
-#define BALANCE_ANGLE_OFFSET_DEG     (-2.0f)
+ * 或实现 stand 模式下的慢速零点自学习。
+ * 2026-07-09 整车正方向翻转:θ = accel_raw×SIGN − OFFSET,SIGN 取反后
+ * OFFSET 必须同步取反(-1.2 -> +1.2),物理平衡点才落回 θ≈0。 */
+#define BALANCE_ANGLE_OFFSET_DEG     (1.2f)
 /* Balance car must not treat power-on pose as zero. Use fixed mechanical offset only. */
 #define BALANCE_BOOT_ZERO_ENABLE     0
 
@@ -391,12 +444,12 @@
  * I4 最后CAN StdId
  * I5 CAN接收总计数
  */
-/* BALANCE_CASCADE compact map:
+/* BALANCE_CASCADE drive-diagnosis map:
  * I0 theta_deg, I1 theta_ref_deg, I2 theta_rate_dps, I3 speed_theta_ref_deg
- * I4 velocity_mps, I5 balance_ref_rpm
- * I6 angle_p_ref_rpm, I7 rate_d_ref_rpm
- * I8 avg_ref_rpm, I9 avg_actual_rpm, I10 avg_cmd_a
- * I11 fault, I12 chassis_mode
+ * I4 velocity_ref_mps, I5 velocity_mps, I6 velocity_err_mps
+ * I7 balance_ref_rpm, I8 angle_p_ref_rpm, I9 rate_d_ref_rpm
+ * I10 avg_ref_rpm, I11 avg_actual_rpm, I12 avg_cmd_a
+ * I13 zero_trim_deg, I14 fault, I15 chassis_mode
  */
 #define VOFA_OUTPUT_ENABLE           1
 #define VOFA_OUTPUT_DIVIDER          5U
@@ -405,6 +458,7 @@
 #define VOFA_DEBUG_STAGE_IMU_ATTITUDE   1U
 #define VOFA_DEBUG_STAGE_SPEED_LOOP     2U
 #define VOFA_DEBUG_STAGE_BALANCE_CASCADE 3U
+#define VOFA_DEBUG_STAGE_TRACK_ADC      4U
 #define VOFA_DEBUG_STAGE                VOFA_DEBUG_STAGE_BALANCE_CASCADE
 #if VOFA_OUTPUT_MODE == VOFA_OUTPUT_MODE_ENCODER
 #if VOFA_DEBUG_STAGE == VOFA_DEBUG_STAGE_MOTOR_FEEDBACK
@@ -413,8 +467,10 @@
 #define VOFA_OUTPUT_CHANNEL_COUNT    6U
 #elif VOFA_DEBUG_STAGE == VOFA_DEBUG_STAGE_IMU_ATTITUDE
 #define VOFA_OUTPUT_CHANNEL_COUNT    8U
+#elif VOFA_DEBUG_STAGE == VOFA_DEBUG_STAGE_TRACK_ADC
+#define VOFA_OUTPUT_CHANNEL_COUNT    8U
 #elif VOFA_DEBUG_STAGE == VOFA_DEBUG_STAGE_BALANCE_CASCADE
-#define VOFA_OUTPUT_CHANNEL_COUNT    13U
+#define VOFA_OUTPUT_CHANNEL_COUNT    16U
 #else
 #define VOFA_OUTPUT_CHANNEL_COUNT    12U
 #endif

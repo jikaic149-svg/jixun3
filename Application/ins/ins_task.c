@@ -18,6 +18,7 @@
 #include "bmi088.h"
 #include "bmi088_reg.h"
 #include "vofa.h"
+#include "track.h"
 
 /* Algorithm 层 */
 #include "attitude_algorithm.h"
@@ -25,6 +26,7 @@
 #include "config.h"
 #include "chassis_serial_cmd.h"
 #include "gimbal_task.h"
+#include "mode_control.h"
 
 /* BSP 层 (仅用于 Init 时注入函数指针) */
 #include "bsp_spi.h"
@@ -88,6 +90,7 @@ static BMI088_Instance_t    g_bmi088;
 static KalmanAngle_t        g_balance_kalman;
 static KalmanScalar_t       g_yaw_rate_kalman;
 static Vofa_Instance_t      g_vofa;
+static Track_Instance       g_track;
 
 /* INS 任务句柄 (用于 TaskNotify) */
 static TaskHandle_t ins_task_handle_local = NULL;
@@ -129,11 +132,12 @@ static uint8_t vofa_cmd_len_queue[VOFA_CMD_QUEUE_LEN];
 
 static bool vofa_send_adapter(const uint8_t *data, uint16_t len)
 {
-#if VOFA_UART_PORT == VOFA_UART_PORT_USART6
     return BSP_UART6_SendBytes(data, len);
-#else
-    return BSP_UART1_SendBytes(data, len);
-#endif
+}
+
+static void track_send_adapter(uint8_t *data, uint16_t len)
+{
+    (void)BSP_UART1_SendBytes(data, len);
 }
 
 /* ======================== 初始化 ======================== */
@@ -143,15 +147,15 @@ void INS_Init(void)
     /* ----- 1. BSP 初始化 ----- */
     BSP_DWT_Init();
     BSP_SPI_Init();
-#if VOFA_UART_PORT == VOFA_UART_PORT_USART6
     BSP_UART6_Init();
     BSP_UART6_RegisterRxCallback(vofa_rx_byte_callback);
-#else
-    BSP_UART1_Init();
-    BSP_UART1_RegisterRxCallback(vofa_rx_byte_callback);
-#endif
 
     Vofa_Init(&g_vofa, vofa_send_adapter);
+#if TRACKING_UART_ENABLE
+    BSP_UART1_Init();
+    Track_Init(&g_track, track_send_adapter);
+    BSP_UART1_RegisterRxCallback(Track_OnRxByte);
+#endif
 
     /* ----- 2. BMI088 初始化 (轮询模式，注入 BSP 函数指针) ----- */
     BMI088_Config_t bmi_config = {
@@ -560,12 +564,31 @@ void INS_Task(void *argument)
                                     "left_ref_rpm,left_actual_rpm,left_cmd_a,right_ref_rpm,right_actual_rpm,right_cmd_a\r\n");
                 vofa_header_sent = 1U;
             }
+#elif VOFA_DEBUG_STAGE == VOFA_DEBUG_STAGE_TRACK_ADC
+            float vofa_channels[VOFA_OUTPUT_CHANNEL_COUNT] = {
+                (float)Track_GetADC(&g_track, 0U),
+                (float)Track_GetADC(&g_track, 1U),
+                (float)Track_GetADC(&g_track, 2U),
+                (float)Track_GetADC(&g_track, 3U),
+                (float)Track_GetADC(&g_track, 4U),
+                (float)Track_GetADC(&g_track, 5U),
+                (float)Track_GetADC(&g_track, 6U),
+                (float)Track_GetADC(&g_track, 7U)
+            };
+            if (vofa_header_sent == 0U) {
+                (void)Vofa_SendText(&g_vofa,
+                                    "track_x1_adc,track_x2_adc,track_x3_adc,track_x4_adc,track_x5_adc,track_x6_adc,track_x7_adc,track_x8_adc\r\n");
+                vofa_header_sent = 1U;
+            }
 #else
             float vofa_balance_angle_deg = balance_pid_theta_deg;
             float vofa_balance_angle_reference_deg = balance_pid_theta_ref_deg;
             float vofa_balance_angle_rate_dps = balance_pid_theta_rate_dps;
             float vofa_speed_angle_reference_deg = balance_pid_speed_theta_ref_deg;
+            float vofa_velocity_reference_mps = balance_pid_velocity_ref_mps;
             float vofa_velocity_mps = balance_pid_velocity_mps;
+            float vofa_velocity_error_mps =
+                vofa_velocity_reference_mps - vofa_velocity_mps;
             float vofa_balance_speed_reference_rpm = balance_pid_balance_speed_ref_rpm;
             float vofa_angle_speed_reference_rpm = balance_pid_angle_speed_ref_rpm;
             float vofa_rate_speed_reference_rpm = balance_pid_rate_speed_ref_rpm;
@@ -575,6 +598,7 @@ void INS_Task(void *argument)
                 0.5f * (wheel_speed_actual_left_rpm + wheel_speed_actual_right_rpm);
             float vofa_average_current_command_a =
                 0.5f * (wheel_speed_output_left_a + wheel_speed_output_right_a);
+            float vofa_zero_trim_deg = balance_pid_zero_trim_deg;
             float vofa_fault_code = (float)chassis_fault_code;
             float vofa_chassis_mode = (float)chassis_mode;
             float vofa_channels[VOFA_OUTPUT_CHANNEL_COUNT] = {
@@ -582,19 +606,22 @@ void INS_Task(void *argument)
                 vofa_balance_angle_reference_deg,
                 vofa_balance_angle_rate_dps,
                 vofa_speed_angle_reference_deg,
+                vofa_velocity_reference_mps,
                 vofa_velocity_mps,
+                vofa_velocity_error_mps,
                 vofa_balance_speed_reference_rpm,
                 vofa_angle_speed_reference_rpm,
                 vofa_rate_speed_reference_rpm,
                 vofa_average_speed_reference_rpm,
                 vofa_average_actual_speed_rpm,
                 vofa_average_current_command_a,
+                vofa_zero_trim_deg,
                 vofa_fault_code,
                 vofa_chassis_mode
             };
             if (vofa_header_sent == 0U) {
                 (void)Vofa_SendText(&g_vofa,
-                                    "theta_deg,theta_ref_deg,theta_rate_dps,speed_theta_ref_deg,velocity_mps,balance_ref_rpm,angle_p_ref_rpm,rate_d_ref_rpm,avg_ref_rpm,avg_actual_rpm,avg_cmd_a,fault,chassis_mode\r\n");
+                                    "theta_deg,theta_ref_deg,theta_rate_dps,speed_theta_ref_deg,velocity_ref_mps,velocity_mps,velocity_err_mps,balance_ref_rpm,angle_p_ref_rpm,rate_d_ref_rpm,avg_ref_rpm,avg_actual_rpm,avg_cmd_a,zero_trim_deg,fault,chassis_mode\r\n");
                 vofa_header_sent = 1U;
             }
 #endif
@@ -658,6 +685,14 @@ void BT_RxTask(void *argument)
         while (vofa_cmd_pop(line, &len) != 0U) {
             (void)ChassisSerialCmd_HandleLine(line, len);
         }
+#if TRACKING_UART_ENABLE
+        if (g_track.data_ready != 0U) {
+            float track_error;
+            g_track.data_ready = 0U;
+            track_error = Track_GetError(&g_track);
+            Mode_TrackingSetError(track_error, (uint32_t)xTaskGetTickCount());
+        }
+#endif
 
         vTaskDelay(pdMS_TO_TICKS(2));
     }
