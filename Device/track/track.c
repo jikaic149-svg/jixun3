@@ -15,7 +15,8 @@ static const uint16_t TRACK_WHITE_REFERENCE[8] = {
 static const uint16_t TRACK_BLACK_REFERENCE[8] = {
     2783, 2857, 2718, 2773, 2681, 2738, 2836, 2657
 };
-static const float TRACK_BLACK_DETECT_RATIO = 0.30f;
+static const float TRACK_LINE_CONTRAST_DETECT_RATIO = 0.08f;
+static const float TRACK_BLOCK_BLACK_DETECT_RATIO = 0.55f;
 static const float TRACK_WEIGHTS[8] = {
     -9.0f, -5.0f, -2.0f, -1.0f, 1.0f, 2.0f, 5.0f, 9.0f
 };
@@ -34,6 +35,29 @@ static float track_black_strength(uint8_t sensor, uint16_t adc)
         return 1.0f;
     }
     return strength;
+}
+
+static float track_common_strength(const float strength[TRACK_SENSOR_COUNT])
+{
+    float min_1 = strength[0];
+    float min_2 = strength[1];
+
+    if (min_2 < min_1) {
+        float temp = min_1;
+        min_1 = min_2;
+        min_2 = temp;
+    }
+
+    for (uint8_t i = 2U; i < TRACK_SENSOR_COUNT; i++) {
+        if (strength[i] < min_1) {
+            min_2 = min_1;
+            min_1 = strength[i];
+        } else if (strength[i] < min_2) {
+            min_2 = strength[i];
+        }
+    }
+
+    return 0.5f * (min_1 + min_2);
 }
 
 void Track_Init(Track_Instance *inst, Track_UartSend_t send_fn)
@@ -141,35 +165,43 @@ void Track_OnRxByte(uint8_t byte)
 
 float Track_GetError(Track_Instance *inst)
 {
-    float weighted_sum = 0.0f;
-    float total_black  = 0.0f;
-    uint8_t black_count = 0U;
+    float strength[TRACK_SENSOR_COUNT];
+    float common_strength;
+    float difference = 0.0f;
+    float sum = 0.0f;
+    uint8_t block_black_count = 0U;
 
     if (inst == NULL) {
         return TRACK_LOST_LINE;
     }
 
-    for (int i = 0; i < 8; i++) {
-        uint16_t adc = inst->adc_value[i];
-
-        float strength = track_black_strength((uint8_t)i, adc);
-
-        if (strength > TRACK_BLACK_DETECT_RATIO) {
-            weighted_sum += strength * TRACK_WEIGHTS[i];
-            total_black  += strength;
-            black_count++;
+    for (uint8_t i = 0U; i < TRACK_SENSOR_COUNT; i++) {
+        strength[i] = track_black_strength(i, inst->adc_value[i]);
+        if (strength[i] > TRACK_BLOCK_BLACK_DETECT_RATIO) {
+            block_black_count++;
         }
     }
 
-    if (black_count >= 7U) {
+    if (block_black_count >= 7U) {
         return 0.0f;
     }
 
-    if (black_count == 0U || total_black <= 0.0f) {
+    common_strength = track_common_strength(strength);
+    for (uint8_t i = 0U; i < TRACK_SENSOR_COUNT; i++) {
+        float contrast = strength[i] - common_strength;
+
+        if (contrast > TRACK_LINE_CONTRAST_DETECT_RATIO) {
+            float signal = contrast - TRACK_LINE_CONTRAST_DETECT_RATIO;
+            difference += signal * TRACK_WEIGHTS[i];
+            sum += signal;
+        }
+    }
+
+    if (sum <= 0.001f) {
         return TRACK_LOST_LINE;
     }
 
-    return (weighted_sum / total_black);
+    return difference / sum;
 }
 
 uint8_t Track_GetBlackCount(Track_Instance *inst)
@@ -180,11 +212,11 @@ uint8_t Track_GetBlackCount(Track_Instance *inst)
         return 0U;
     }
 
-    for (int i = 0; i < 8; i++) {
+    for (uint8_t i = 0U; i < TRACK_SENSOR_COUNT; i++) {
         uint16_t adc = inst->adc_value[i];
 
-        if (track_black_strength((uint8_t)i, adc) >
-            TRACK_BLACK_DETECT_RATIO) {
+        if (track_black_strength(i, adc) >
+            TRACK_BLOCK_BLACK_DETECT_RATIO) {
             black_count++;
         }
     }

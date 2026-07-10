@@ -9,6 +9,7 @@ typedef enum {
     TRACKING_BLOCK_TARGET_ARMED,
     TRACKING_BLOCK_TARGET_RUNOUT,
     TRACKING_BLOCK_TARGET_STOPPED,
+    TRACKING_BLOCK_TARGET_DEPART,
     TRACKING_BLOCK_TARGET_WAIT_EXIT,
     TRACKING_BLOCK_FINISH_ARMED,
     TRACKING_BLOCK_FINISH_RUNOUT,
@@ -28,6 +29,7 @@ static float tracking_block_wide_sec = 0.0f;
 static float tracking_block_clear_sec = 0.0f;
 static float tracking_target_runout_sec = 0.0f;
 static float tracking_target_laser_sec = 0.0f;
+static float tracking_target_depart_sec = 0.0f;
 static float tracking_finish_runout_sec = 0.0f;
 static TrackingBlockState_t tracking_block_state = TRACKING_BLOCK_WAIT_START;
 static uint8_t tracking_ready = 0U;
@@ -162,6 +164,7 @@ static void tracking_update_block_state(uint8_t wide_block,
 
     case TRACKING_BLOCK_TARGET_RUNOUT:
     case TRACKING_BLOCK_TARGET_STOPPED:
+    case TRACKING_BLOCK_TARGET_DEPART:
     case TRACKING_BLOCK_FINISH_RUNOUT:
     case TRACKING_BLOCK_FINISH_DONE:
     default:
@@ -184,6 +187,7 @@ void Mode_TrackingReset(void)
     tracking_block_clear_sec = 0.0f;
     tracking_target_runout_sec = 0.0f;
     tracking_target_laser_sec = 0.0f;
+    tracking_target_depart_sec = 0.0f;
     tracking_finish_runout_sec = 0.0f;
     tracking_block_state = TRACKING_BLOCK_WAIT_START;
     tracking_ready = 0U;
@@ -265,7 +269,8 @@ void Mode_TrackingBuild(ModeCommand_t *command,
         tracking_target_laser_sec += dt_sec;
         if (tracking_target_laser_sec >=
             (0.001f * (float)TRACKING_TARGET_BLOCK_LASER_MS)) {
-            tracking_block_state = TRACKING_BLOCK_TARGET_WAIT_EXIT;
+            tracking_block_state = TRACKING_BLOCK_TARGET_DEPART;
+            tracking_target_depart_sec = 0.0f;
             tracking_block_clear_sec = 0.0f;
             tracking_ready = 0U;
             tracking_integral = 0.0f;
@@ -285,6 +290,15 @@ void Mode_TrackingBuild(ModeCommand_t *command,
             command->drive_enabled = 0U;
             command->laser_enabled = 1U;
             return;
+        }
+    }
+
+    if (tracking_block_state == TRACKING_BLOCK_TARGET_DEPART) {
+        tracking_target_depart_sec += dt_sec;
+        if (tracking_target_depart_sec >=
+            (0.001f * (float)TRACKING_TARGET_BLOCK_DEPART_MS)) {
+            tracking_block_state = TRACKING_BLOCK_TARGET_WAIT_EXIT;
+            tracking_block_clear_sec = 0.0f;
         }
     }
 
