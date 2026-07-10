@@ -23,6 +23,7 @@ void Mode_CommandClear(ModeCommand_t *command)
     command->turn_rpm = 0.0f;
     command->drive_enabled = 0U;
     command->tracking_active = 0U;
+    command->laser_enabled = 0U;
 }
 
 void Mode_Init(void)
@@ -45,7 +46,7 @@ void Mode_Set(ChassisMode_e mode)
 
     if (mode_active != mode) {
         mode_active = mode;
-        if (mode != CHASSIS_MODE_TRACKING) {
+        if (mode == CHASSIS_MODE_TRACKING) {
             Mode_TrackingReset();
         }
     }

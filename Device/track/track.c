@@ -8,16 +8,33 @@
 
 static Track_Instance *track_bound_inst = NULL;
 
-/* 2026-07-09 VOFA: floor is low ADC, black tape is high ADC. */
-static const uint16_t TRACK_WHITE_BASE[8] = {
-    929, 1210, 1176, 1222, 901, 737, 893, 613
+/* 2026-07-10 daylight VOFA calibration; black tape is high ADC. */
+static const uint16_t TRACK_WHITE_REFERENCE[8] = {
+    416, 802, 599, 726, 454, 508, 772, 377
 };
-static const float TRACK_DIFF_THRESHOLD = 400.0f;
-static const float TRACK_BLACK_TOTAL_MIN = 700.0f;
-static const float TRACK_CROSSBAR_RANGE_MAX = 900.0f;
+static const uint16_t TRACK_BLACK_REFERENCE[8] = {
+    1854, 2237, 2307, 2507, 2259, 2093, 2125, 1521
+};
+static const float TRACK_BLACK_DETECT_RATIO = 0.30f;
 static const float TRACK_WEIGHTS[8] = {
-    -18.0f, -9.0f, -3.0f, -1.0f, 1.0f, 3.0f, 9.0f, 18.0f
+    -9.0f, -5.0f, -2.0f, -1.0f, 1.0f, 2.0f, 5.0f, 9.0f
 };
+
+static float track_black_strength(uint8_t sensor, uint16_t adc)
+{
+    float white = (float)TRACK_WHITE_REFERENCE[sensor];
+    float span = (float)(TRACK_BLACK_REFERENCE[sensor] -
+                         TRACK_WHITE_REFERENCE[sensor]);
+    float strength = ((float)adc - white) / span;
+
+    if (strength < 0.0f) {
+        return 0.0f;
+    }
+    if (strength > 1.0f) {
+        return 1.0f;
+    }
+    return strength;
+}
 
 void Track_Init(Track_Instance *inst, Track_UartSend_t send_fn)
 {
@@ -126,38 +143,31 @@ float Track_GetError(Track_Instance *inst)
 {
     float weighted_sum = 0.0f;
     float total_black  = 0.0f;
-    uint16_t min_adc = 0xFFFFU;
-    uint16_t max_adc = 0U;
     uint8_t black_count = 0U;
 
+    if (inst == NULL) {
+        return TRACK_LOST_LINE;
+    }
+
     for (int i = 0; i < 8; i++) {
-        float diff = 0.0f;
         uint16_t adc = inst->adc_value[i];
 
-        if (adc < min_adc) {
-            min_adc = adc;
-        }
-        if (adc > max_adc) {
-            max_adc = adc;
-        }
+        float strength = track_black_strength((uint8_t)i, adc);
 
-        if (adc > TRACK_WHITE_BASE[i]) {
-            diff = (float)(adc - TRACK_WHITE_BASE[i]);
-        }
-
-        if (diff > TRACK_DIFF_THRESHOLD) {
-            weighted_sum += diff * TRACK_WEIGHTS[i];
-            total_black  += diff;
+        if (strength > TRACK_BLACK_DETECT_RATIO) {
+            weighted_sum += strength * TRACK_WEIGHTS[i];
+            total_black  += strength;
             black_count++;
         }
     }
 
-    if ((black_count >= 7U) &&
-        ((float)(max_adc - min_adc) < TRACK_CROSSBAR_RANGE_MAX)) {
+    if (black_count >= 7U) {
         return 0.0f;
     }
 
-    if (total_black < TRACK_BLACK_TOTAL_MIN) return TRACK_LOST_LINE;
+    if (black_count == 0U || total_black <= 0.0f) {
+        return TRACK_LOST_LINE;
+    }
 
     return (weighted_sum / total_black);
 }
@@ -173,8 +183,8 @@ uint8_t Track_GetBlackCount(Track_Instance *inst)
     for (int i = 0; i < 8; i++) {
         uint16_t adc = inst->adc_value[i];
 
-        if ((adc > TRACK_WHITE_BASE[i]) &&
-            (((float)(adc - TRACK_WHITE_BASE[i])) > TRACK_DIFF_THRESHOLD)) {
+        if (track_black_strength((uint8_t)i, adc) >
+            TRACK_BLACK_DETECT_RATIO) {
             black_count++;
         }
     }

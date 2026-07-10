@@ -2,7 +2,15 @@
 #define MODE_CONTROL_H
 
 #include <stdint.h>
-#include "gimbal_task.h"
+
+typedef enum {
+    CHASSIS_MODE_STAND = 0,
+    CHASSIS_MODE_FORWARD,
+    CHASSIS_MODE_BACKWARD,
+    CHASSIS_MODE_TURN_LEFT,
+    CHASSIS_MODE_TURN_RIGHT,
+    CHASSIS_MODE_TRACKING
+} ChassisMode_e;
 
 typedef struct {
     float velocity_mps;
@@ -10,6 +18,7 @@ typedef struct {
     float turn_rpm;
     uint8_t drive_enabled;
     uint8_t tracking_active;
+    uint8_t laser_enabled;
 } ModeCommand_t;
 
 void Mode_Init(void);

@@ -1,0 +1,208 @@
+#include "mode_gimbal.h"
+
+#include <stddef.h>
+
+#include "config.h"
+
+static GimbalMode_e gimbal_mode = GIMBAL_MODE_RELAX;
+static GimbalCommand_t gimbal_command;
+static float gimbal_center_angle_deg = 0.0f;
+static float gimbal_target_offset_deg = 0.0f;
+static float gimbal_integral_a = 0.0f;
+static float gimbal_filtered_speed_rpm = 0.0f;
+static uint8_t gimbal_center_valid = 0U;
+static uint8_t gimbal_capture_center = 0U;
+static uint8_t gimbal_speed_filter_ready = 0U;
+
+static float gimbal_absf(float value)
+{
+    return (value >= 0.0f) ? value : -value;
+}
+
+static float gimbal_limit(float value, float abs_limit)
+{
+    float limit = gimbal_absf(abs_limit);
+
+    if (value > limit) {
+        return limit;
+    }
+    if (value < -limit) {
+        return -limit;
+    }
+    return value;
+}
+
+static float gimbal_wrap_angle(float angle_deg)
+{
+    while (angle_deg >= 360.0f) {
+        angle_deg -= 360.0f;
+    }
+    while (angle_deg < 0.0f) {
+        angle_deg += 360.0f;
+    }
+    return angle_deg;
+}
+
+static float gimbal_wrap_error(float error_deg)
+{
+    while (error_deg >= 180.0f) {
+        error_deg -= 360.0f;
+    }
+    while (error_deg < -180.0f) {
+        error_deg += 360.0f;
+    }
+    return error_deg;
+}
+
+static void gimbal_clear_command(void)
+{
+    gimbal_command.target_offset_deg = gimbal_target_offset_deg;
+    gimbal_command.target_angle_deg = gimbal_center_angle_deg;
+    gimbal_command.error_deg = 0.0f;
+    gimbal_command.yaw_current_a = 0.0f;
+    gimbal_command.drive_enabled = 0U;
+}
+
+void Mode_GimbalInit(void)
+{
+    gimbal_mode = GIMBAL_MODE_RELAX;
+    gimbal_center_angle_deg = 0.0f;
+    gimbal_target_offset_deg = 0.0f;
+    gimbal_integral_a = 0.0f;
+    gimbal_filtered_speed_rpm = 0.0f;
+    gimbal_center_valid = 0U;
+    gimbal_capture_center = 0U;
+    gimbal_speed_filter_ready = 0U;
+    gimbal_clear_command();
+}
+
+void Mode_GimbalSet(GimbalMode_e mode)
+{
+    if (mode > GIMBAL_MODE_AIM) {
+        mode = GIMBAL_MODE_RELAX;
+    }
+    if (gimbal_mode == mode) {
+        return;
+    }
+
+    gimbal_mode = mode;
+    gimbal_integral_a = 0.0f;
+    gimbal_speed_filter_ready = 0U;
+
+    if (mode == GIMBAL_MODE_RELAX) {
+        gimbal_capture_center = 0U;
+        gimbal_clear_command();
+    } else if (mode == GIMBAL_MODE_HOLD) {
+        gimbal_target_offset_deg = 0.0f;
+        gimbal_capture_center = 1U;
+    } else if (gimbal_center_valid == 0U) {
+        gimbal_capture_center = 1U;
+    }
+}
+
+GimbalMode_e Mode_GimbalGet(void)
+{
+    return gimbal_mode;
+}
+
+void Mode_GimbalSetTargetOffsetDeg(float offset_deg)
+{
+    gimbal_target_offset_deg =
+        gimbal_limit(offset_deg, GIMBAL_YAW_SOFT_LIMIT_DEG);
+}
+
+void Mode_GimbalAddTargetOffsetDeg(float delta_deg)
+{
+    Mode_GimbalSetTargetOffsetDeg(gimbal_target_offset_deg + delta_deg);
+}
+
+void Mode_GimbalUpdate(float encoder_angle_deg,
+                       float encoder_speed_rpm,
+                       uint8_t feedback_ready,
+                       float dt_sec)
+{
+    float target_offset_deg;
+    float target_angle_deg;
+    float raw_error_deg;
+    float control_error_deg;
+    float output_current_a;
+
+    gimbal_clear_command();
+
+    if (dt_sec <= 0.0f) {
+        dt_sec = GIMBAL_YAW_CONTROL_DT_SEC;
+    } else if (dt_sec > 0.02f) {
+        dt_sec = 0.02f;
+    }
+
+    if ((feedback_ready == 0U) || (gimbal_mode == GIMBAL_MODE_RELAX)) {
+        gimbal_integral_a = 0.0f;
+        gimbal_speed_filter_ready = 0U;
+        return;
+    }
+
+    encoder_angle_deg = gimbal_wrap_angle(encoder_angle_deg);
+    if ((gimbal_capture_center != 0U) || (gimbal_center_valid == 0U)) {
+        gimbal_center_angle_deg = encoder_angle_deg;
+        gimbal_center_valid = 1U;
+        gimbal_capture_center = 0U;
+        gimbal_integral_a = 0.0f;
+    }
+
+    if (gimbal_speed_filter_ready == 0U) {
+        gimbal_filtered_speed_rpm = encoder_speed_rpm;
+        gimbal_speed_filter_ready = 1U;
+    } else {
+        gimbal_filtered_speed_rpm =
+            GIMBAL_YAW_SPEED_LPF_ALPHA * gimbal_filtered_speed_rpm +
+            (1.0f - GIMBAL_YAW_SPEED_LPF_ALPHA) * encoder_speed_rpm;
+    }
+
+    target_offset_deg = (gimbal_mode == GIMBAL_MODE_HOLD) ?
+                        0.0f : gimbal_target_offset_deg;
+    target_angle_deg =
+        gimbal_wrap_angle(gimbal_center_angle_deg + target_offset_deg);
+    raw_error_deg =
+        gimbal_wrap_error(target_angle_deg - encoder_angle_deg);
+    raw_error_deg = gimbal_limit(raw_error_deg, GIMBAL_YAW_MAX_ERROR_DEG);
+    control_error_deg = raw_error_deg;
+
+    if (control_error_deg > GIMBAL_YAW_DEADBAND_DEG) {
+        control_error_deg -= GIMBAL_YAW_DEADBAND_DEG;
+    } else if (control_error_deg < -GIMBAL_YAW_DEADBAND_DEG) {
+        control_error_deg += GIMBAL_YAW_DEADBAND_DEG;
+    } else {
+        control_error_deg = 0.0f;
+    }
+
+    if (gimbal_absf(raw_error_deg) > GIMBAL_YAW_INTEGRAL_ZONE_DEG) {
+        gimbal_integral_a = 0.0f;
+    } else {
+        gimbal_integral_a +=
+            GIMBAL_YAW_KI_A_PER_DEG_S * raw_error_deg * dt_sec;
+        gimbal_integral_a =
+            gimbal_limit(gimbal_integral_a, GIMBAL_YAW_INTEGRAL_LIMIT_A);
+    }
+
+    output_current_a =
+        (GIMBAL_YAW_KP_A_PER_DEG * control_error_deg +
+         gimbal_integral_a -
+         GIMBAL_YAW_KD_A_PER_RPM * gimbal_filtered_speed_rpm) *
+        GIMBAL_YAW_CONTROL_SIGN;
+    output_current_a =
+        gimbal_limit(output_current_a, GIMBAL_YAW_CURRENT_LIMIT_A);
+
+    gimbal_command.target_offset_deg = target_offset_deg;
+    gimbal_command.target_angle_deg = target_angle_deg;
+    gimbal_command.error_deg = raw_error_deg;
+    gimbal_command.yaw_current_a = output_current_a;
+    gimbal_command.drive_enabled = 1U;
+}
+
+void Mode_GimbalGetCommand(GimbalCommand_t *command)
+{
+    if (command == NULL) {
+        return;
+    }
+    *command = gimbal_command;
+}

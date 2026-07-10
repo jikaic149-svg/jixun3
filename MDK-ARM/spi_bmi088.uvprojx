@@ -570,6 +570,11 @@
               <FilePath>../BSP/bsp_delay.c</FilePath>
             </File>
             <File>
+              <FileName>bsp_laser.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../bsp/bsp_laser.c</FilePath>
+            </File>
+            <File>
               <FileName>bsp_can.c</FileName>
               <FileType>1</FileType>
               <FilePath>../bsp/bsp_can.c</FilePath>
@@ -643,6 +648,11 @@
               <FileName>mode_tracking.c</FileName>
               <FileType>1</FileType>
               <FilePath>../mode/mode_tracking.c</FilePath>
+            </File>
+            <File>
+              <FileName>mode_gimbal.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../mode/mode_gimbal.c</FilePath>
             </File>
           </Files>
         </Group>

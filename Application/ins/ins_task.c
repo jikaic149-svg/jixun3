@@ -591,6 +591,29 @@ void INS_Task(void *argument)
                                     "track_x1_adc,track_x2_adc,track_x3_adc,track_x4_adc,track_x5_adc,track_x6_adc,track_x7_adc,track_x8_adc,track_error,lost,chassis_mode,cmd_velocity_mps,turn_rpm,actual_velocity_mps,ref_velocity_mps,velocity_err_mps\r\n");
                 vofa_header_sent = 1U;
             }
+#elif VOFA_DEBUG_STAGE == VOFA_DEBUG_STAGE_YAW_CAN
+            float vofa_channels[VOFA_OUTPUT_CHANNEL_COUNT] = {
+                (float)gimbal_yaw_enable_queue_ok_count,
+                (float)gimbal_yaw_enable_queue_fail_count,
+                (float)can_gimbal_rx_count,
+                (float)gimbal_yaw_motor.rx_count,
+                (float)gimbal_yaw_motor.enabled,
+                (float)can_last_std_id,
+                (float)can_last_dlc,
+                (float)can_rx_count,
+                gimbal_yaw_motor.angle,
+                gimbal_yaw_motor.speed_can_rpm,
+                gimbal_yaw_motor.current,
+                (float)Motor_FeedbackReady(
+                    &gimbal_yaw_motor,
+                    now_tick,
+                    pdMS_TO_TICKS(GIMBAL_YAW_FEEDBACK_TIMEOUT_MS))
+            };
+            if (vofa_header_sent == 0U) {
+                (void)Vofa_SendText(&g_vofa,
+                                    "yaw_enable_queue_ok,yaw_enable_queue_fail,yaw_rx_count,yaw_motor_rx_count,yaw_enabled,last_can_id,last_can_dlc,can_rx_count,yaw_angle_deg,yaw_speed_rpm,yaw_feedback_a,yaw_feedback_fresh\r\n");
+                vofa_header_sent = 1U;
+            }
 #else
             float vofa_balance_angle_deg = balance_pid_theta_deg;
             float vofa_balance_angle_reference_deg = balance_pid_theta_ref_deg;

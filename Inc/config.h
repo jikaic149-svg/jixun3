@@ -13,6 +13,20 @@
 #define LEFT_WHEEL_MOTOR_ID     0x00U
 #define RIGHT_WHEEL_MOTOR_ID    0x01U
 
+/* QD4310 yaw motor: command 0x402, feedback 0x502, CAN 1 Mbps. */
+#define GIMBAL_YAW_MOTOR_CAN_ID_CONFIGURED  1U
+#define GIMBAL_YAW_MOTOR_ID                 0x02U
+
+#if GIMBAL_YAW_MOTOR_CAN_ID_CONFIGURED
+#if (GIMBAL_YAW_MOTOR_ID > 0x0FU)
+#error "GIMBAL_YAW_MOTOR_ID must be in the QD4310 range 0x00..0x0F"
+#endif
+#if ((GIMBAL_YAW_MOTOR_ID == LEFT_WHEEL_MOTOR_ID) || \
+     (GIMBAL_YAW_MOTOR_ID == RIGHT_WHEEL_MOTOR_ID))
+#error "GIMBAL_YAW_MOTOR_ID must not conflict with a wheel motor ID"
+#endif
+#endif
+
 #define DRIVE_CAN_BAUD_RATE     1000000U
 #define DRIVE_UART_BAUD_RATE    115200U
 
@@ -90,6 +104,35 @@
 #define WHEEL_FEEDBACK_TIMEOUT_MS     100U
 #define WHEEL_ZERO_CURRENT_KEEPALIVE  1
 #define WHEEL_SAFE_TASK_PERIOD_MS     1U
+
+/* One-axis QD4310 yaw gimbal. Vision will feed target offsets later. */
+#define GIMBAL_YAW_AUTO_HOLD_ENABLE       1U
+#define GIMBAL_YAW_CURRENT_COMMAND_ENABLE 0U
+#define GIMBAL_YAW_ENABLE_RETRY_MS        100U
+#define GIMBAL_YAW_FEEDBACK_TIMEOUT_MS    100U
+#define GIMBAL_YAW_MOTOR_SPEED_KP         0.00300f
+#define GIMBAL_YAW_MOTOR_SPEED_KI         0.000390f
+#define GIMBAL_YAW_MOTOR_SPEED_KD         0.000f
+#define GIMBAL_YAW_MOTOR_ANGLE_KP         1200.0f
+#define GIMBAL_YAW_MOTOR_ANGLE_KI         0.000f
+#define GIMBAL_YAW_MOTOR_ANGLE_KD         0.000f
+#define GIMBAL_YAW_MOTOR_SPEED_LIMIT_RPM  250.0f
+#define GIMBAL_YAW_MOTOR_CURRENT_LIMIT_A  1.65f
+#define GIMBAL_YAW_FEEDBACK_SIGN          1.0f
+#define GIMBAL_YAW_CURRENT_SIGN           1.0f
+#define GIMBAL_YAW_CONTROL_SIGN           1.0f
+#define GIMBAL_YAW_CONTROL_DT_SEC          0.001f
+#define GIMBAL_YAW_SOFT_LIMIT_DEG         120.0f
+#define GIMBAL_YAW_MAX_ERROR_DEG          20.0f
+#define GIMBAL_YAW_DEADBAND_DEG           0.2f
+#define GIMBAL_YAW_INTEGRAL_ZONE_DEG      3.0f
+#define GIMBAL_YAW_KP_A_PER_DEG           0.050f
+#define GIMBAL_YAW_KI_A_PER_DEG_S         0.200f
+#define GIMBAL_YAW_KD_A_PER_RPM           0.001f
+#define GIMBAL_YAW_INTEGRAL_LIMIT_A       0.30f
+/* Bring-up clamp; raise only after encoder/current polarity is verified. */
+#define GIMBAL_YAW_CURRENT_LIMIT_A        0.30f
+#define GIMBAL_YAW_SPEED_LPF_ALPHA        0.30f
 
 /* 离地左轮 ESO+PI 轮速测试：上电默认急停，按键授权后才输出非零电流。 */
 #define WHEEL_SPEED_TEST_ENABLE             0U
@@ -205,7 +248,7 @@
  * 维持巡航;斜坡在 launch 结束时用实测速度接力(gimbal_task.c),
  * 不再从 0 重爬把车刹回坑里。bias 全部回真实平衡点 -0.8。
  */
-#define BALANCE_MODE_STAND_BIAS_DEG         0.0f
+#define BALANCE_MODE_STAND_BIAS_DEG        -0.1f
 #define BALANCE_MODE_FORWARD_BIAS_DEG       1.7f
 #define BALANCE_MODE_BACKWARD_BIAS_DEG      BALANCE_MODE_STAND_BIAS_DEG
 #define BALANCE_MODE_BIAS_SLEW_DEG_PER_SEC  2.0f
@@ -330,19 +373,21 @@
 #define BALANCE_MODE_TURN_SPEED_RPM         16.0f
 #define TRACKING_UART_ENABLE                1U
 #define TRACKING_DATA_TIMEOUT_MS            120U
+#define TRACKING_START_SEARCH_VELOCITY_MPS  0.04f
 #define TRACKING_BASE_VELOCITY_MPS          0.06f
-#define TRACKING_LOST_HOLD_MS               300U
-#define TRACKING_LOST_HOLD_VELOCITY_MPS     0.04f
-#define TRACKING_LOST_REFIND_MS             1200U
-#define TRACKING_LOST_REFIND_VELOCITY_MPS   0.035f
-#define TRACKING_LOST_VELOCITY_MPS          0.0f
-#define TRACKING_FORWARD_BIAS_DEG           0.4f
-#define TRACKING_TURN_KP_RPM_PER_ERROR      12.0f
+#define TRACKING_LOST_HOLD_MS               1000U
+#define TRACKING_LOST_HOLD_VELOCITY_MPS     0.03f
+#define TRACKING_LOST_REFIND_MS             500U
+#define TRACKING_LOST_REFIND_VELOCITY_MPS   0.03f
+#define TRACKING_LOST_VELOCITY_MPS          0.02f
+#define TRACKING_FORWARD_BIAS_DEG           0.0f
+#define TRACKING_TURN_KP_RPM_PER_ERROR      10.0f
 #define TRACKING_TURN_KI_RPM_PER_ERROR_S    0.0f
-#define TRACKING_TURN_KD_RPM_PER_ERROR_RATE 0.08f
-#define TRACKING_TURN_LIMIT_RPM             24.0f
-#define TRACKING_LOST_HOLD_TURN_RPM         18.0f
-#define TRACKING_LOST_REFIND_TURN_RPM       22.0f
+#define TRACKING_TURN_KD_RPM_PER_ERROR_RATE 0.0f
+#define TRACKING_TURN_LIMIT_RPM             32.0f
+#define TRACKING_LOST_HOLD_TURN_RPM         6.0f
+#define TRACKING_LOST_REFIND_TURN_RPM       8.0f
+#define TRACKING_LOST_SEARCH_TURN_RPM       4.0f
 #define TRACKING_LOST_DEFAULT_TURN_DIR      1.0f
 #define TRACKING_TURN_MEMORY_MIN_RPM        2.0f
 #define TRACKING_ERROR_LPF_ALPHA            0.65f
@@ -354,16 +399,21 @@
 #define TRACKING_SHARP_TURN_EXIT_ERROR      1.2f
 #define TRACKING_SHARP_TURN_GATE_RPM        20.0f
 #define TRACKING_SHARP_TURN_VELOCITY_MPS    0.035f
+/* Course order: A start crossbar -> center target marker -> B finish crossbar. */
 #define TRACKING_BLOCK_BLACK_COUNT_MIN      7U
-#define TRACKING_START_BLOCK_CONFIRM_MS     250U
+#define TRACKING_TARGET_BLOCK_BLACK_COUNT_MIN 5U
+#define TRACKING_START_BLOCK_CONFIRM_MS     0U
 #define TRACKING_START_BLOCK_EXIT_MS        300U
-#define TRACKING_TARGET_BLOCK_CONFIRM_MS    220U
+#define TRACKING_TARGET_BLOCK_CONFIRM_MS    0U
 #define TRACKING_TARGET_BLOCK_RUNOUT_MS     500U
 #define TRACKING_TARGET_BLOCK_RUNOUT_VELOCITY_MPS 0.04f
-#define TRACKING_TARGET_BLOCK_STOP_MS       3000U
+#define TRACKING_TARGET_BLOCK_LASER_MS      3000U
+#define TRACKING_TARGET_BLOCK_EXIT_MS       300U
+#define TRACKING_FINISH_BLOCK_CONFIRM_MS    0U
+#define TRACKING_FINISH_BLOCK_RUNOUT_MS     500U
+#define TRACKING_FINISH_BLOCK_RUNOUT_VELOCITY_MPS 0.04f
 #define TRACKING_LOST_ERROR                 7.5f
 #define TRACKING_MIN_SPEED_RATIO            0.45f
-#define TRACKING_LOST_TURN_DECAY            0.85f
 #define BALANCE_PID_POLARITY                1.0f
 #define BALANCE_PID_POSITION_SIGN           1.0f
 #define BALANCE_PID_VELOCITY_SIGN           1.0f
@@ -483,6 +533,12 @@
  * I3 右轮反馈计数
  * I4 最后CAN StdId
  * I5 CAN接收总计数
+ *
+ * YAW_CAN诊断通道顺序：
+ * I0 enable成功进入邮箱次数, I1 enable邮箱失败次数
+ * I2 yaw反馈计数, I3 yaw实例反馈计数, I4 yaw enabled
+ * I5 最后CAN StdId, I6 最后CAN DLC, I7 CAN接收总计数
+ * I8 yaw角度deg, I9 yaw速度rpm, I10 yaw反馈电流A, I11 yaw反馈新鲜
  */
 /* BALANCE_CASCADE drive-diagnosis map:
  * I0 theta_deg, I1 theta_ref_deg, I2 theta_rate_dps, I3 speed_theta_ref_deg
@@ -499,6 +555,7 @@
 #define VOFA_DEBUG_STAGE_SPEED_LOOP     2U
 #define VOFA_DEBUG_STAGE_BALANCE_CASCADE 3U
 #define VOFA_DEBUG_STAGE_TRACK_ADC      4U
+#define VOFA_DEBUG_STAGE_YAW_CAN        5U
 #define VOFA_DEBUG_STAGE                VOFA_DEBUG_STAGE_TRACK_ADC
 #if VOFA_OUTPUT_MODE == VOFA_OUTPUT_MODE_ENCODER
 #if VOFA_DEBUG_STAGE == VOFA_DEBUG_STAGE_MOTOR_FEEDBACK
@@ -509,6 +566,8 @@
 #define VOFA_OUTPUT_CHANNEL_COUNT    8U
 #elif VOFA_DEBUG_STAGE == VOFA_DEBUG_STAGE_TRACK_ADC
 #define VOFA_OUTPUT_CHANNEL_COUNT    16U
+#elif VOFA_DEBUG_STAGE == VOFA_DEBUG_STAGE_YAW_CAN
+#define VOFA_OUTPUT_CHANNEL_COUNT    12U
 #elif VOFA_DEBUG_STAGE == VOFA_DEBUG_STAGE_BALANCE_CASCADE
 #define VOFA_OUTPUT_CHANNEL_COUNT    16U
 #else

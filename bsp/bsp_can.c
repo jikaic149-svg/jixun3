@@ -6,8 +6,10 @@ extern CAN_HandleTypeDef hcan1;
 
 volatile Motor_Measure_t left_wheel_motor;   // 左轮反馈, id = 0x00
 volatile Motor_Measure_t right_wheel_motor;  // 右轮反馈, id = 0x01
+volatile Motor_Measure_t gimbal_yaw_motor;
 volatile uint32_t can_rx_count = 0U;
 volatile uint32_t can_wheel_rx_count = 0U;
+volatile uint32_t can_gimbal_rx_count = 0U;
 volatile uint32_t can_last_std_id = 0U;
 volatile uint32_t can_last_dlc = 0U;
 
@@ -39,6 +41,11 @@ static uint32_t motor_feedback_tick_from_isr(void)
 
 static float motor_feedback_sign(uint8_t id)
 {
+#if GIMBAL_YAW_MOTOR_CAN_ID_CONFIGURED
+    if (id == GIMBAL_YAW_MOTOR_ID) {
+        return GIMBAL_YAW_FEEDBACK_SIGN;
+    }
+#endif
     if (id == RIGHT_WHEEL_MOTOR_ID) {
         return RIGHT_WHEEL_FEEDBACK_SIGN;
     }
@@ -47,6 +54,11 @@ static float motor_feedback_sign(uint8_t id)
 
 static float motor_current_sign(uint8_t id)
 {
+#if GIMBAL_YAW_MOTOR_CAN_ID_CONFIGURED
+    if (id == GIMBAL_YAW_MOTOR_ID) {
+        return GIMBAL_YAW_CURRENT_SIGN;
+    }
+#endif
     if (id == RIGHT_WHEEL_MOTOR_ID) {
         return RIGHT_WHEEL_CURRENT_SIGN;
     }
@@ -84,7 +96,7 @@ void CAN_Filter_Init(void) {
 /**
   * @brief  底层 CAN 发送指令封装
   */
-static void CAN_SendCommand(uint8_t id, uint8_t cmd, int16_t value) {
+static HAL_StatusTypeDef CAN_SendCommand(uint8_t id, uint8_t cmd, int16_t value) {
     uint8_t TxBuffer[3];
     TxBuffer[0] = cmd;
     // 小端模式：低位在前
@@ -102,23 +114,23 @@ static void CAN_SendCommand(uint8_t id, uint8_t cmd, int16_t value) {
     
     /* 无空闲邮箱则丢帧，避免 CAN 断线时 Gimbal_Task 死锁 */
     if (HAL_CAN_GetTxMailboxesFreeLevel(&hcan1) == 0)
-        return;
+        return HAL_BUSY;
 
-    HAL_CAN_AddTxMessage(&hcan1, &TxHeader, TxBuffer, &txMailbox);
+    return HAL_CAN_AddTxMessage(&hcan1, &TxHeader, TxBuffer, &txMailbox);
 }
 
 /**
   * @brief  使能电机
   */
-void Motor_Enable(uint8_t id) {
-    CAN_SendCommand(id, 0x01, 0x0000);
+HAL_StatusTypeDef Motor_Enable(uint8_t id) {
+    return CAN_SendCommand(id, 0x01, 0x0000);
 }
 
 /**
   * @brief  失能电机
   */
 void Motor_Disable(uint8_t id) {
-    CAN_SendCommand(id, 0x02, 0x0000);
+    (void)CAN_SendCommand(id, 0x02, 0x0000);
 }
 
 /**
@@ -133,7 +145,7 @@ void Motor_SetCurrent(uint8_t id, float current) {
     if (current < -10.0f) current = -10.0f;
     
     int16_t value = (int16_t)(current / 10.0f * 32767.0f);
-    CAN_SendCommand(id, 0x03, value);
+    (void)CAN_SendCommand(id, 0x03, value);
 }
 
 /**
@@ -148,7 +160,7 @@ void Motor_SetAngle(uint8_t id, float angle) {
     
     // angle(度) / 360 * UINT16_MAX
     uint16_t value = (uint16_t)(angle / 360.0f * 65535.0f);
-    CAN_SendCommand(id, 0x05, (int16_t)value);
+    (void)CAN_SendCommand(id, 0x05, (int16_t)value);
 }
 
 uint8_t Motor_FeedbackReady(const volatile Motor_Measure_t *motor,
@@ -180,13 +192,17 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan) {
         
         // 接收反馈帧ID: 0x500 + motor_id
         if (rx_header.StdId >= 0x500 && rx_header.StdId <= 0x508) {
-            can_wheel_rx_count++;
             volatile Motor_Measure_t *motor = NULL;
             if (rx_header.StdId == 0x500) {
                 motor = &left_wheel_motor;
             } else if (rx_header.StdId == 0x501) {
                 motor = &right_wheel_motor;
             }
+#if GIMBAL_YAW_MOTOR_CAN_ID_CONFIGURED
+            else if (rx_header.StdId == (0x500U + GIMBAL_YAW_MOTOR_ID)) {
+                motor = &gimbal_yaw_motor;
+            }
+#endif
             
             if (motor != NULL && rx_header.DLC >= 8U) {
                 float sign;
@@ -208,6 +224,16 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan) {
 
                 motor->rx_count++;
                 motor->last_rx_tick = now_tick;
+                if ((rx_header.StdId == (0x500U + LEFT_WHEEL_MOTOR_ID)) ||
+                    (rx_header.StdId == (0x500U + RIGHT_WHEEL_MOTOR_ID))) {
+                    can_wheel_rx_count++;
+                }
+#if GIMBAL_YAW_MOTOR_CAN_ID_CONFIGURED
+                else if (rx_header.StdId ==
+                         (0x500U + GIMBAL_YAW_MOTOR_ID)) {
+                    can_gimbal_rx_count++;
+                }
+#endif
             }
         }
     }

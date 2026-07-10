@@ -2,13 +2,7 @@
 #define GIMBAL_TASK_H
 
 #include "stdint.h"
-
-typedef enum {
-    GIMBAL_STATE_RELAX = 0,
-    GIMBAL_STATE_ENC_LOCK,
-    GIMBAL_STATE_CALIBRATING,
-    GIMBAL_STATE_IMU_STAB
-} GimbalState_e;
+#include "mode_control.h"
 
 typedef enum {
     CHASSIS_MOTOR_ESTOP = 0,
@@ -20,15 +14,6 @@ typedef enum {
 } ChassisMotorState_e;
 
 typedef enum {
-    CHASSIS_MODE_STAND = 0,
-    CHASSIS_MODE_FORWARD,
-    CHASSIS_MODE_BACKWARD,
-    CHASSIS_MODE_TURN_LEFT,
-    CHASSIS_MODE_TURN_RIGHT,
-    CHASSIS_MODE_TRACKING
-} ChassisMode_e;
-
-typedef enum {
     BALANCE_PID_RUNTIME_KP = 0,
     BALANCE_PID_RUNTIME_KI,
     BALANCE_PID_RUNTIME_KD,
@@ -37,7 +22,6 @@ typedef enum {
     BALANCE_PID_RUNTIME_CURRENT_SLEW_A_PER_SEC
 } BalancePidRuntimeParam_e;
 
-extern volatile GimbalState_e gimbal_state;
 extern volatile ChassisMotorState_e chassis_motor_state;
 extern volatile ChassisMode_e chassis_mode;
 extern volatile uint8_t chassis_motor_feedback_ok;
@@ -94,6 +78,8 @@ extern volatile uint32_t chassis_serial_cmd_ok_count;
 extern volatile uint8_t chassis_serial_cmd_last_type;
 extern volatile float chassis_serial_cmd_last_value;
 extern volatile uint8_t balance_zero_bias_frozen;
+extern volatile uint32_t gimbal_yaw_enable_queue_ok_count;
+extern volatile uint32_t gimbal_yaw_enable_queue_fail_count;
 
 extern void Gimbal_Task(void *argument);
 void WheelSpeed_SetTargetRpm(float rpm);

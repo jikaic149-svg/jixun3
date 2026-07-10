@@ -6,10 +6,6 @@
 #include "main.h"
 #include "config.h"
 
-/* Wheel motor IDs. YAW/PITCH aliases are kept only for old code. */
-#define YAW_MOTOR_ID   LEFT_WHEEL_MOTOR_ID
-#define PITCH_MOTOR_ID RIGHT_WHEEL_MOTOR_ID
-
 typedef struct {
     uint8_t enabled;
     float current;
@@ -23,16 +19,15 @@ typedef struct {
 
 extern volatile Motor_Measure_t left_wheel_motor;
 extern volatile Motor_Measure_t right_wheel_motor;
+extern volatile Motor_Measure_t gimbal_yaw_motor;
 extern volatile uint32_t can_rx_count;
 extern volatile uint32_t can_wheel_rx_count;
+extern volatile uint32_t can_gimbal_rx_count;
 extern volatile uint32_t can_last_std_id;
 extern volatile uint32_t can_last_dlc;
 
-#define yaw_motor   left_wheel_motor
-#define pitch_motor right_wheel_motor
-
 void CAN_Filter_Init(void);
-void Motor_Enable(uint8_t id);
+HAL_StatusTypeDef Motor_Enable(uint8_t id);
 void Motor_Disable(uint8_t id);
 void Motor_SetCurrent(uint8_t id, float current);
 void Motor_SetAngle(uint8_t id, float angle);

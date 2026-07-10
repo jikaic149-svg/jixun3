@@ -5188,3 +5188,121 @@ speed_theta_ref = BALANCE_POSITION_KP × position_error +
 - `mode=5` 下看 `I13 actual_velocity_mps` 是否从 `0.10~0.20` 降向 `I14 ref≈0.06`。
 - 短丢线时 `I12 turn_rpm` 应保持上一方向，不再重置为 0 后重新找线。
 - 若仍速度过高，继续优先降 `TRACKING_FORWARD_BIAS_DEG`，不动普通直立环。
+
+## 2026-07-10 循迹降敏与终点停车锁存修复
+
+### Codex provider 前置条件检查
+
+- 未读取或记录任何 API Key 内容。
+- 当前进程、用户级、系统级均未检测到 `OPENAI_API_KEY`。
+- 当前自定义 provider 已使用 `wire_api = "responses"`，但尚未配置
+  `env_key = "OPENAI_API_KEY"`，且 `requires_openai_auth` 仍为 `true`。
+- 撤销旧 Key、签发新 Key、为新 Key 开通 `codex-auto-review`（或改为人工审批）以及
+  重启后确认 403 消失，都属于服务端/账户操作，本次固件修改无法代办，仍待完成。
+
+### 代码修改
+
+| 位置 | 修改 | 目的 |
+|---|---|---|
+| `Device/track/track.c` | 灰度权重 `{-18,-9,-3,-1,+1,+3,+9,+18}` 改为 `{-7,-4,-2,-1,+1,+2,+4,+7}` | 缩小边缘误差幅值，降低大转向指令出现频率 |
+| `TRACKING_TURN_KP_RPM_PER_ERROR` | `12.0f -> 4.0f` | 降低比例转向增益 |
+| `TRACKING_TURN_KD_RPM_PER_ERROR_RATE` | `0.08f -> 0.0f` | 暂停微分项，避免误差跳变放大 |
+| `TRACKING_TURN_LIMIT_RPM` | 保持 `24.0f` | 保留必要的最大转向权限 |
+| `TRACKING_FORWARD_BIAS_DEG` | 保持 `0.4f` | 等新固件速度数据后再判断是否降到 `0~0.1deg` |
+| `TRACKING_BLOCK_DONE` | 每拍明确输出 `velocity_mps=0`、`turn_rpm=0`、stand bias、`drive_enabled=0`，随后立即 `return` | 终点停车状态锁存，不再落入丢线或正常循迹分支 |
+| `Mode_Set()` | `Mode_TrackingReset()` 改为只在进入循迹模式的模式边沿调用 | 重复发送 `mode 5` 不能解锁；必须先退出、再重新进入循迹才复位 |
+
+### 原故障数据证据（修改前基线，不能视为本版实测）
+
+- `vofa+.csv` 共 5425 帧，其中循迹 3696 帧。
+- 两个循迹段都出现了恰好 150 帧的 `I11 cmd_velocity_mps=0`；按 20ms/帧计算均为
+  3.0s，随后在 `mode=5` 未退出的情况下重新输出前进速度，和旧代码
+  `TRACKING_BLOCK_DONE` 继续落入正常循迹分支完全一致。
+- 有效见线帧中，`I8 track_error` 范围 `-5.942~+5.716`，绝对值均值 `1.247`；
+  `I12 turn_rpm` 有 115/2395 帧（4.80%）撞到 `|turn|>=23.9rpm`。
+- 旧参数移动段中：`I13 actual_velocity` 均值 `0.0496m/s`，
+  `I14 ref_velocity` 均值 `0.0449m/s`，`I15 velocity_err` 均值 `-0.0048m/s`、
+  绝对值均值 `0.0504m/s`。该数据采集于本次改权重/KP/KD/停车逻辑之前，
+  因此不据此继续修改固定前倾量。
+
+### 编译检查
+
+使用 ARM GCC 10.3-2021.10、项目实际宏和完整 include 路径，以
+`-fsyntax-only -Wall -Werror` 检查，以下文件全部 0 错误、0 警告：
+
+- `Device/track/track.c`
+- `mode/mode_tracking.c`
+- `mode/mode_control.c`
+- `Application/ins/ins_task.c`
+- `Application/gimbal/gimbal_task.c`
+
+### 待上车验证
+
+- 正常循迹观察 `I8 track_error`、`I12 turn_rpm`，统计本版撞 `+/-24rpm` 的比例。
+- 经过终点标记后等待超过 3s，确认 `I11=0`、`I12=0` 且始终不重新前进。
+- 停车锁存后重复发送 `mode 5`，确认不能解锁；先退出循迹再进入，确认状态机复位。
+- 重新记录本版 `I13 actual_velocity`、`I14 ref_velocity`、`I15 velocity_err`，
+  再决定是否将 `TRACKING_FORWARD_BIAS_DEG` 从 `0.4f` 降到 `0~0.1f`。
+
+## 2026-07-10 一维 yaw 云台接入 mode 与终点激光时序
+
+### C 板激光接口
+
+- 本地大疆 C 板官方示例 `20.standard_robot/bsp/boards/bsp_laser.c` 使用
+  `TIM3_CH3` 控制板载激光；对应管脚为 `PC8`，`CCR=ARR` 开、`CCR=0` 关。
+- 当前工程新增 `bsp_laser.c/.h`，并在 `tim.c/.h` 和 `spi_bmi088.ioc` 中补齐
+  `TIM3_CH3 / PC8` 的 10kHz PWM 配置（84MHz / 8400）。
+- 上电初始化时 PWM 比较值保持 0，激光默认关闭，不再上电常亮。
+
+### 终点激光时序
+
+- `ModeCommand_t` 新增 `laser_enabled`，普通模式和循迹正常行驶/冲线阶段均为 0。
+- 检测终点横向标记后先按原逻辑以 `0.04m/s` 冲线 500ms；进入
+  `TRACKING_BLOCK_STOPPED` 后，车辆输出零速度、零转向和 stand bias，同时激光打开。
+- `TRACKING_TARGET_BLOCK_STOP_MS=3000ms` 到时进入 `TRACKING_BLOCK_DONE`，立即关闭激光，
+  并继续锁存停车；提前退出循迹或发生其他模式切换也会因命令清零而关闭激光。
+- `Application/gimbal/gimbal_task.c` 的 1ms 电机安全任务读取 mode 命令并执行
+  `BSP_LaserOn/Off()`，mode 层不直接依赖 HAL/TIM。
+
+### 一维 yaw QD4310
+
+- yaw 电机现有配置：`can.id=005`，CAN 1Mbps，命令帧 `0x405`、反馈帧 `0x505`。
+- 电机侧参数记录为：速度 PID `0.00300/0.000390/0`，角度 PID `1200/0/0`，
+  `limit.speed=250rpm`，`limit.current=1.65A`；STM32 不在启动时重写电机内部配置。
+- `bsp_can` 新增独立 `gimbal_yaw_motor` 和 `can_gimbal_rx_count`，删除旧代码把
+  `yaw_motor` 别名到左轮的危险兼容宏；反馈 ID 0x505 不再污染左右轮实例。
+- 新增 `mode/mode_gimbal.c/.h`，提供 `RELAX/HOLD/AIM` 三种状态。控制器使用 QD4310
+  编码器角度和速度反馈，首次进入 HOLD 捕获当前位置为中心；AIM 的目标接口为相对中心
+  `Mode_GimbalSetTargetOffsetDeg()`，并限制在 `+/-120deg`。
+- 视觉模块本轮不接入；`Device/vision` 不调用 yaw 目标接口，后续融合只需把视觉换算后的
+  yaw 偏移送入 mode 层，不进入 1ms 电流内环。
+- yaw 电机启动时只发送 enable 并接收反馈；当前电流命令编译开关关闭，mode 层仍可进入
+  HOLD 并计算控制量，但不会向 ID 0x05 发送任何 `Motor_SetCurrent()` 帧。
+
+### 构建检查
+
+- ARM GCC 10.3-2021.10 以 `-fsyntax-only -Wall -Werror` 检查 `main/tim/bsp_laser/`
+  `bsp_can/mode_gimbal/mode_control/mode_tracking/gimbal_task/chassis_serial_cmd/ins_task`，
+  全部通过。
+- 独立目录 `build/codex_verify` 完整编译 63 个 C 文件、启动汇编并链接成功；ELF 大小：
+  text 50724B、data 176B、bss 27248B。链接符号确认包含 `MX_TIM3_Init`、
+  `BSP_Laser*`、`Mode_Gimbal*` 和 `gimbal_yaw_motor`。
+- Keil `spi_bmi088.uvprojx` XML 解析通过，Makefile 和 Keil 工程都已加入
+  `bsp_laser.c`、`mode_gimbal.c`。
+
+### 待上车验证
+
+- 上电确认激光保持关闭；未到终点时任何循迹/丢线状态都不能点亮。
+- 经过终点标记：500ms 冲线后停车并点亮激光，约 3.0s 后关闭；继续等待确认车辆和激光
+  都不重新启动。退出再进入循迹后，确认终点状态机可以重新执行一次。
+- 确认 CAN 收到 0x505 且 `gimbal_yaw_motor` 反馈更新；手动转动云台时角度/速度应更新，
+  电机保持使能但不能主动回正，也不能出现 ID 0x05 的电流命令帧。
+- 后续允许电流输出时，再先以 0.30A 做小角度回正测试；若误差继续增大，立即急停并翻转
+  `GIMBAL_YAW_CONTROL_SIGN`，确认极性后再接入 AIM 目标。
+
+### 2026-07-10 yaw 仅使能、禁止电流命令
+
+- yaw 电机仍在启动时发送 `Motor_Enable(0x05)`，并继续解析 `0x505` 反馈。
+- 新增 `GIMBAL_YAW_CURRENT_COMMAND_ENABLE=0`；该配置会在编译期移除 yaw 的
+  `Motor_SetCurrent()` 调用，因此不会发送非零电流，也不会发送 0A 保活电流帧。
+- `mode_gimbal` 暂时只计算 HOLD/AIM 目标和控制量，待确认允许输出后再显式打开该开关。

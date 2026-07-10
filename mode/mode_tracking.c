@@ -6,10 +6,13 @@
 typedef enum {
     TRACKING_BLOCK_WAIT_START = 0,
     TRACKING_BLOCK_WAIT_START_EXIT,
-    TRACKING_BLOCK_ARMED,
-    TRACKING_BLOCK_RUNOUT,
-    TRACKING_BLOCK_STOPPED,
-    TRACKING_BLOCK_DONE
+    TRACKING_BLOCK_TARGET_ARMED,
+    TRACKING_BLOCK_TARGET_RUNOUT,
+    TRACKING_BLOCK_TARGET_STOPPED,
+    TRACKING_BLOCK_TARGET_WAIT_EXIT,
+    TRACKING_BLOCK_FINISH_ARMED,
+    TRACKING_BLOCK_FINISH_RUNOUT,
+    TRACKING_BLOCK_FINISH_DONE
 } TrackingBlockState_t;
 
 static float tracking_filtered_error = 0.0f;
@@ -24,7 +27,8 @@ static float tracking_lost_elapsed_sec = 0.0f;
 static float tracking_block_wide_sec = 0.0f;
 static float tracking_block_clear_sec = 0.0f;
 static float tracking_target_runout_sec = 0.0f;
-static float tracking_target_stop_sec = 0.0f;
+static float tracking_target_laser_sec = 0.0f;
+static float tracking_finish_runout_sec = 0.0f;
 static TrackingBlockState_t tracking_block_state = TRACKING_BLOCK_WAIT_START;
 static uint8_t tracking_ready = 0U;
 static uint8_t tracking_line_seen = 0U;
@@ -75,7 +79,6 @@ static void tracking_begin_lost_search(void)
 
 static float tracking_build_lost_turn(float min_turn_rpm)
 {
-    float hold_turn_rpm = tracking_last_turn_rpm;
     float turn_dir = (tracking_lost_active != 0U) ?
                      tracking_lost_search_dir : tracking_last_turn_dir;
 
@@ -83,18 +86,13 @@ static float tracking_build_lost_turn(float min_turn_rpm)
         turn_dir = tracking_default_lost_dir();
     }
 
-    if (turn_dir != 0.0f) {
-        float min_turn = turn_dir * min_turn_rpm;
-
-        if ((hold_turn_rpm * turn_dir) < min_turn_rpm) {
-            hold_turn_rpm = min_turn;
-        }
-    }
-
-    return mode_limit_abs(hold_turn_rpm, TRACKING_TURN_LIMIT_RPM);
+    return mode_limit_abs(turn_dir * mode_absf(min_turn_rpm),
+                          TRACKING_TURN_LIMIT_RPM);
 }
 
-static void tracking_update_block_state(uint8_t wide_block, float dt_sec)
+static void tracking_update_block_state(uint8_t wide_block,
+                                        uint8_t target_block,
+                                        float dt_sec)
 {
     switch (tracking_block_state) {
     case TRACKING_BLOCK_WAIT_START:
@@ -117,18 +115,18 @@ static void tracking_update_block_state(uint8_t wide_block, float dt_sec)
             tracking_block_clear_sec += dt_sec;
             if (tracking_block_clear_sec >=
                 (0.001f * (float)TRACKING_START_BLOCK_EXIT_MS)) {
-                tracking_block_state = TRACKING_BLOCK_ARMED;
+                tracking_block_state = TRACKING_BLOCK_TARGET_ARMED;
                 tracking_block_wide_sec = 0.0f;
             }
         }
         break;
 
-    case TRACKING_BLOCK_ARMED:
-        if (wide_block != 0U) {
+    case TRACKING_BLOCK_TARGET_ARMED:
+        if (target_block != 0U) {
             tracking_block_wide_sec += dt_sec;
             if (tracking_block_wide_sec >=
                 (0.001f * (float)TRACKING_TARGET_BLOCK_CONFIRM_MS)) {
-                tracking_block_state = TRACKING_BLOCK_RUNOUT;
+                tracking_block_state = TRACKING_BLOCK_TARGET_RUNOUT;
                 tracking_target_runout_sec = 0.0f;
             }
         } else {
@@ -136,9 +134,36 @@ static void tracking_update_block_state(uint8_t wide_block, float dt_sec)
         }
         break;
 
-    case TRACKING_BLOCK_RUNOUT:
-    case TRACKING_BLOCK_STOPPED:
-    case TRACKING_BLOCK_DONE:
+    case TRACKING_BLOCK_TARGET_WAIT_EXIT:
+        if (target_block != 0U) {
+            tracking_block_clear_sec = 0.0f;
+        } else {
+            tracking_block_clear_sec += dt_sec;
+            if (tracking_block_clear_sec >=
+                (0.001f * (float)TRACKING_TARGET_BLOCK_EXIT_MS)) {
+                tracking_block_state = TRACKING_BLOCK_FINISH_ARMED;
+                tracking_block_wide_sec = 0.0f;
+            }
+        }
+        break;
+
+    case TRACKING_BLOCK_FINISH_ARMED:
+        if (wide_block != 0U) {
+            tracking_block_wide_sec += dt_sec;
+            if (tracking_block_wide_sec >=
+                (0.001f * (float)TRACKING_FINISH_BLOCK_CONFIRM_MS)) {
+                tracking_block_state = TRACKING_BLOCK_FINISH_RUNOUT;
+                tracking_finish_runout_sec = 0.0f;
+            }
+        } else {
+            tracking_block_wide_sec = 0.0f;
+        }
+        break;
+
+    case TRACKING_BLOCK_TARGET_RUNOUT:
+    case TRACKING_BLOCK_TARGET_STOPPED:
+    case TRACKING_BLOCK_FINISH_RUNOUT:
+    case TRACKING_BLOCK_FINISH_DONE:
     default:
         break;
     }
@@ -158,7 +183,8 @@ void Mode_TrackingReset(void)
     tracking_block_wide_sec = 0.0f;
     tracking_block_clear_sec = 0.0f;
     tracking_target_runout_sec = 0.0f;
-    tracking_target_stop_sec = 0.0f;
+    tracking_target_laser_sec = 0.0f;
+    tracking_finish_runout_sec = 0.0f;
     tracking_block_state = TRACKING_BLOCK_WAIT_START;
     tracking_ready = 0U;
     tracking_line_seen = 0U;
@@ -177,6 +203,7 @@ void Mode_TrackingBuild(ModeCommand_t *command,
     float speed_scale = 1.0f;
     float turn_rpm;
     uint8_t wide_block;
+    uint8_t target_block;
 
     Mode_CommandClear(command);
     command->tracking_active = 1U;
@@ -187,14 +214,42 @@ void Mode_TrackingBuild(ModeCommand_t *command,
 
     wide_block = ((sensor_fresh != 0U) &&
                   (black_count >= TRACKING_BLOCK_BLACK_COUNT_MIN)) ? 1U : 0U;
-    tracking_update_block_state(wide_block, dt_sec);
+    target_block = ((sensor_fresh != 0U) &&
+                    (black_count >=
+                     TRACKING_TARGET_BLOCK_BLACK_COUNT_MIN)) ? 1U : 0U;
+    tracking_update_block_state(wide_block, target_block, dt_sec);
 
-    if (tracking_block_state == TRACKING_BLOCK_RUNOUT) {
+    if (tracking_block_state == TRACKING_BLOCK_WAIT_START) {
+        tracking_ready = 0U;
+        tracking_line_seen = 0U;
+        tracking_lost_elapsed_sec = 0.0f;
+        tracking_lost_active = 0U;
+        tracking_lost_search_dir = 0.0f;
+        tracking_last_turn_rpm = 0.0f;
+        command->turn_rpm = 0.0f;
+        command->laser_enabled = 0U;
+
+        if (sensor_fresh != 0U) {
+            command->velocity_mps = TRACKING_START_SEARCH_VELOCITY_MPS;
+            command->bias_deg = TRACKING_FORWARD_BIAS_DEG;
+            command->drive_enabled = 1U;
+        } else {
+            command->velocity_mps = 0.0f;
+            command->bias_deg = BALANCE_MODE_STAND_BIAS_DEG;
+            command->drive_enabled = 0U;
+        }
+
+        tracking_last_velocity_mps = command->velocity_mps;
+        tracking_last_bias_deg = command->bias_deg;
+        return;
+    }
+
+    if (tracking_block_state == TRACKING_BLOCK_TARGET_RUNOUT) {
         tracking_target_runout_sec += dt_sec;
         if (tracking_target_runout_sec >=
             (0.001f * (float)TRACKING_TARGET_BLOCK_RUNOUT_MS)) {
-            tracking_block_state = TRACKING_BLOCK_STOPPED;
-            tracking_target_stop_sec = 0.0f;
+            tracking_block_state = TRACKING_BLOCK_TARGET_STOPPED;
+            tracking_target_laser_sec = 0.0f;
         } else {
             command->velocity_mps = TRACKING_TARGET_BLOCK_RUNOUT_VELOCITY_MPS;
             command->bias_deg = TRACKING_FORWARD_BIAS_DEG;
@@ -206,11 +261,12 @@ void Mode_TrackingBuild(ModeCommand_t *command,
         }
     }
 
-    if (tracking_block_state == TRACKING_BLOCK_STOPPED) {
-        tracking_target_stop_sec += dt_sec;
-        if (tracking_target_stop_sec >=
-            (0.001f * (float)TRACKING_TARGET_BLOCK_STOP_MS)) {
-            tracking_block_state = TRACKING_BLOCK_DONE;
+    if (tracking_block_state == TRACKING_BLOCK_TARGET_STOPPED) {
+        tracking_target_laser_sec += dt_sec;
+        if (tracking_target_laser_sec >=
+            (0.001f * (float)TRACKING_TARGET_BLOCK_LASER_MS)) {
+            tracking_block_state = TRACKING_BLOCK_TARGET_WAIT_EXIT;
+            tracking_block_clear_sec = 0.0f;
             tracking_ready = 0U;
             tracking_integral = 0.0f;
             tracking_lost_elapsed_sec = 0.0f;
@@ -223,19 +279,62 @@ void Mode_TrackingBuild(ModeCommand_t *command,
             tracking_lost_elapsed_sec = 0.0f;
             tracking_lost_active = 0U;
             tracking_lost_search_dir = 0.0f;
+            command->velocity_mps = 0.0f;
             command->bias_deg = BALANCE_MODE_STAND_BIAS_DEG;
+            command->turn_rpm = 0.0f;
+            command->drive_enabled = 0U;
+            command->laser_enabled = 1U;
             return;
         }
     }
 
-    if (tracking_block_state == TRACKING_BLOCK_DONE) {
-        tracking_block_wide_sec = 0.0f;
-        tracking_block_clear_sec = 0.0f;
-        tracking_target_runout_sec = 0.0f;
-        tracking_target_stop_sec = 0.0f;
+    if (tracking_block_state == TRACKING_BLOCK_FINISH_RUNOUT) {
+        tracking_finish_runout_sec += dt_sec;
+        if (tracking_finish_runout_sec >=
+            (0.001f * (float)TRACKING_FINISH_BLOCK_RUNOUT_MS)) {
+            tracking_block_state = TRACKING_BLOCK_FINISH_DONE;
+            tracking_ready = 0U;
+            tracking_integral = 0.0f;
+            tracking_lost_elapsed_sec = 0.0f;
+            tracking_lost_active = 0U;
+            tracking_lost_search_dir = 0.0f;
+        } else {
+            command->velocity_mps =
+                TRACKING_FINISH_BLOCK_RUNOUT_VELOCITY_MPS;
+            command->bias_deg = TRACKING_FORWARD_BIAS_DEG;
+            command->turn_rpm = 0.0f;
+            command->drive_enabled = 1U;
+            tracking_last_velocity_mps = command->velocity_mps;
+            tracking_last_bias_deg = command->bias_deg;
+            return;
+        }
     }
 
-    if ((sensor_fresh == 0U) || (error == TRACK_LOST_LINE)) {
+    if (tracking_block_state == TRACKING_BLOCK_FINISH_DONE) {
+        tracking_last_velocity_mps = 0.0f;
+        tracking_last_bias_deg = BALANCE_MODE_STAND_BIAS_DEG;
+        tracking_last_turn_rpm = 0.0f;
+        command->velocity_mps = 0.0f;
+        command->bias_deg = BALANCE_MODE_STAND_BIAS_DEG;
+        command->turn_rpm = 0.0f;
+        command->drive_enabled = 0U;
+        command->laser_enabled = 0U;
+        return;
+    }
+
+    if (sensor_fresh == 0U) {
+        tracking_lost_elapsed_sec = 0.0f;
+        tracking_lost_active = 0U;
+        tracking_lost_search_dir = 0.0f;
+        tracking_last_turn_rpm = 0.0f;
+        command->velocity_mps = 0.0f;
+        command->bias_deg = BALANCE_MODE_STAND_BIAS_DEG;
+        command->turn_rpm = 0.0f;
+        command->drive_enabled = 0U;
+        return;
+    }
+
+    if (error == TRACK_LOST_LINE) {
         float lost_hold_sec = 0.001f * (float)TRACKING_LOST_HOLD_MS;
         float lost_refind_sec =
             lost_hold_sec + 0.001f * (float)TRACKING_LOST_REFIND_MS;
@@ -251,7 +350,7 @@ void Mode_TrackingBuild(ModeCommand_t *command,
             command->turn_rpm = hold_turn_rpm;
             tracking_last_turn_rpm = hold_turn_rpm;
             command->velocity_mps = TRACKING_LOST_HOLD_VELOCITY_MPS;
-            command->bias_deg = tracking_last_bias_deg;
+            command->bias_deg = BALANCE_MODE_STAND_BIAS_DEG;
         } else if ((tracking_line_seen != 0U) &&
                    (tracking_lost_elapsed_sec <= lost_refind_sec)) {
             float refind_turn_rpm =
@@ -263,15 +362,16 @@ void Mode_TrackingBuild(ModeCommand_t *command,
             command->turn_rpm = refind_turn_rpm;
             tracking_last_turn_rpm = refind_turn_rpm;
             command->velocity_mps = TRACKING_LOST_REFIND_VELOCITY_MPS;
-            command->bias_deg = tracking_last_bias_deg;
+            command->bias_deg = BALANCE_MODE_STAND_BIAS_DEG;
         } else {
+            float search_turn_rpm =
+                tracking_build_lost_turn(TRACKING_LOST_SEARCH_TURN_RPM);
+
             tracking_ready = 0U;
             tracking_integral = 0.0f;
             tracking_sharp_turn_active = 0U;
-            tracking_last_turn_rpm =
-                mode_limit_abs(tracking_last_turn_rpm * TRACKING_LOST_TURN_DECAY,
-                               TRACKING_TURN_LIMIT_RPM);
-            command->turn_rpm = tracking_last_turn_rpm;
+            command->turn_rpm = search_turn_rpm;
+            tracking_last_turn_rpm = search_turn_rpm;
             command->velocity_mps = TRACKING_LOST_VELOCITY_MPS;
             command->bias_deg = BALANCE_MODE_STAND_BIAS_DEG;
         }

@@ -6,9 +6,11 @@
 #include "task.h"
 #include "ins_task.h"
 #include "bsp_can.h"
+#include "bsp_laser.h"
 #include "config.h"
 #include "main.h"
 #include "mode_control.h"
+#include "mode_gimbal.h"
 
 typedef struct {
     float kp;
@@ -19,7 +21,6 @@ typedef struct {
     float output_limit;
 } ChassisPidController_t;
 
-volatile GimbalState_e gimbal_state = GIMBAL_STATE_RELAX;
 volatile ChassisMotorState_e chassis_motor_state = CHASSIS_MOTOR_ESTOP;
 volatile ChassisMode_e chassis_mode = CHASSIS_MODE_STAND;
 volatile uint8_t chassis_motor_feedback_ok = 0U;
@@ -78,6 +79,8 @@ volatile uint8_t chassis_serial_cmd_last_type = 0U;
 volatile float chassis_serial_cmd_last_value = 0.0f;
 volatile uint8_t balance_zero_bias_frozen = 0U;
 volatile uint8_t emergency_stop = 1U;
+volatile uint32_t gimbal_yaw_enable_queue_ok_count = 0U;
+volatile uint32_t gimbal_yaw_enable_queue_fail_count = 0U;
 
 static ChassisMotorState_e last_chassis_motor_state = CHASSIS_MOTOR_ESTOP;
 static volatile uint8_t wheel_speed_target_changed = 0U;
@@ -1611,6 +1614,65 @@ static void Chassis_CalcMotorOutput(float *left_current, float *right_current)
     *right_current = 0.0f;
 }
 
+static void Gimbal_UpdateYawMotor(uint32_t now_tick)
+{
+#if GIMBAL_YAW_MOTOR_CAN_ID_CONFIGURED
+    static uint32_t enable_last_tick = 0U;
+    static uint8_t enable_request_sent = 0U;
+    uint8_t feedback_ready =
+        Motor_FeedbackReady(&gimbal_yaw_motor,
+                            now_tick,
+                            pdMS_TO_TICKS(GIMBAL_YAW_FEEDBACK_TIMEOUT_MS));
+
+    if ((feedback_ready != 0U) && (gimbal_yaw_motor.enabled != 0U)) {
+        enable_request_sent = 0U;
+    } else if ((enable_request_sent == 0U) ||
+               ((uint32_t)(now_tick - enable_last_tick) >=
+                pdMS_TO_TICKS(GIMBAL_YAW_ENABLE_RETRY_MS))) {
+        if (Motor_Enable(GIMBAL_YAW_MOTOR_ID) == HAL_OK) {
+            gimbal_yaw_enable_queue_ok_count++;
+            enable_last_tick = now_tick;
+            enable_request_sent = 1U;
+        } else {
+            gimbal_yaw_enable_queue_fail_count++;
+        }
+    }
+
+    uint8_t control_ready =
+        ((feedback_ready != 0U) &&
+         (gimbal_yaw_motor.enabled != 0U) &&
+         (emergency_stop == 0U)) ? 1U : 0U;
+
+    Mode_GimbalUpdate(gimbal_yaw_motor.angle,
+                      gimbal_yaw_motor.speed_can_rpm,
+                      control_ready,
+                      GIMBAL_YAW_CONTROL_DT_SEC);
+#if GIMBAL_YAW_CURRENT_COMMAND_ENABLE
+    GimbalCommand_t command;
+
+    Mode_GimbalGetCommand(&command);
+    Motor_SetCurrent(GIMBAL_YAW_MOTOR_ID,
+                     (command.drive_enabled != 0U) ?
+                     command.yaw_current_a : 0.0f);
+#endif
+#else
+    (void)now_tick;
+    Mode_GimbalUpdate(0.0f, 0.0f, 0U, GIMBAL_YAW_CONTROL_DT_SEC);
+#endif
+}
+
+static void Gimbal_UpdateLaser(void)
+{
+    ModeCommand_t command;
+
+    Mode_GetCommand(&command);
+    if (command.laser_enabled != 0U) {
+        BSP_LaserOn();
+    } else {
+        BSP_LaserOff();
+    }
+}
+
 void Gimbal_Task(void *argument)
 {
     TickType_t xLastWakeTime = xTaskGetTickCount();
@@ -1619,6 +1681,10 @@ void Gimbal_Task(void *argument)
     (void)argument;
 
     Mode_Init();
+    Mode_GimbalInit();
+#if GIMBAL_YAW_MOTOR_CAN_ID_CONFIGURED && GIMBAL_YAW_AUTO_HOLD_ENABLE
+    Mode_GimbalSet(GIMBAL_MODE_HOLD);
+#endif
 
     for (;;) {
         uint32_t now_tick = (uint32_t)xTaskGetTickCount();
@@ -1656,14 +1722,7 @@ void Gimbal_Task(void *argument)
 #endif
         Chassis_UpdateState();
         Mode_Update(now_tick);
-
-        if (chassis_motor_state == CHASSIS_MOTOR_BALANCE_PID) {
-            gimbal_state = GIMBAL_STATE_IMU_STAB;
-        } else if (chassis_motor_state == CHASSIS_MOTOR_SPEED_TEST) {
-            gimbal_state = GIMBAL_STATE_ENC_LOCK;
-        } else {
-            gimbal_state = GIMBAL_STATE_RELAX;
-        }
+        Gimbal_UpdateLaser();
 
         if (last_chassis_motor_state != chassis_motor_state) {
             if (last_chassis_motor_state == CHASSIS_MOTOR_BALANCE_PID) {
@@ -1699,6 +1758,7 @@ void Gimbal_Task(void *argument)
 
         Chassis_CalcMotorOutput(&left_current, &right_current);
 
+        Gimbal_UpdateYawMotor(now_tick);
         Motor_SetCurrent(LEFT_WHEEL_MOTOR_ID, left_current);
         Motor_SetCurrent(RIGHT_WHEEL_MOTOR_ID, right_current);
 

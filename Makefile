@@ -60,6 +60,7 @@ bsp/bsp_spi.c \
 bsp/bsp_uart.c \
 bsp/bsp_uart6.c \
 bsp/bsp_delay.c \
+bsp/bsp_laser.c \
 bsp/bsp_can.c \
 Device/bmi088/bmi088.c \
 Device/bluetooth/bluetooth.c \
@@ -73,6 +74,7 @@ mode/mode_backward.c \
 mode/mode_turn_left.c \
 mode/mode_turn_right.c \
 mode/mode_tracking.c \
+mode/mode_gimbal.c \
 Application/algorithm/attitude_algorithm.c \
 Application/algorithm/crc16.c \
 Application/algorithm/adrc_eso.c \

@@ -26,6 +26,7 @@
 #include "gpio.h"
 #include "can.h"
 #include "bsp_can.h"
+#include "bsp_laser.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -100,6 +101,7 @@ int main(void)
   MX_GPIO_Init();
   MX_DMA_Init();
   MX_SPI1_Init();
+  MX_TIM3_Init();
   MX_TIM10_Init();
   MX_CAN1_Init();
   /* USER CODE BEGIN 2 */
@@ -108,8 +110,13 @@ int main(void)
   CAN_Filter_Init(); // 启动 CAN 滤波器和中断
 
   /* 唤醒左右轮电机：只enable，不输出电流。 */
-  Motor_Enable(LEFT_WHEEL_MOTOR_ID);
-  Motor_Enable(RIGHT_WHEEL_MOTOR_ID);
+  (void)BSP_LaserInit();
+
+  (void)Motor_Enable(LEFT_WHEEL_MOTOR_ID);
+  (void)Motor_Enable(RIGHT_WHEEL_MOTOR_ID);
+#if GIMBAL_YAW_MOTOR_CAN_ID_CONFIGURED
+  (void)Motor_Enable(GIMBAL_YAW_MOTOR_ID);
+#endif
 
   FreeRTOS_Init();
 
