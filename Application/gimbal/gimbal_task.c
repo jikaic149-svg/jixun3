@@ -128,6 +128,7 @@ static float balance_launch_rearm_timer_sec = 0.0f;
 static float balance_stop_brake_timer_sec = 0.0f;
 static float balance_stop_brake_lowv_timer_sec = 0.0f;
 static float balance_stop_brake_dir = 0.0f;
+static uint8_t balance_last_drive_enabled = 0U;
 static float balance_drive_pulse_timer_sec = 0.0f;
 static float balance_drive_pulse_brake_timer_sec = 0.0f;
 static float balance_drive_pulse_hold_timer_sec = 0.0f;
@@ -553,6 +554,7 @@ static void Chassis_ResetBalancePid(void)
     balance_stop_brake_timer_sec = 0.0f;
     balance_stop_brake_lowv_timer_sec = 0.0f;
     balance_stop_brake_dir = 0.0f;
+    balance_last_drive_enabled = 0U;
     balance_drive_pulse_timer_sec = 0.0f;
     balance_drive_pulse_brake_timer_sec = 0.0f;
     balance_drive_pulse_hold_timer_sec = 0.0f;
@@ -601,6 +603,7 @@ static void Chassis_ResetModeIntegrator(void)
     balance_stop_brake_timer_sec = 0.0f;
     balance_stop_brake_lowv_timer_sec = 0.0f;
     balance_stop_brake_dir = 0.0f;
+    balance_last_drive_enabled = 0U;
     balance_drive_pulse_timer_sec = 0.0f;
     balance_drive_pulse_brake_timer_sec = 0.0f;
     balance_drive_pulse_hold_timer_sec = 0.0f;
@@ -878,6 +881,7 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
     uint8_t drive_pulse_brake_active;
     uint8_t drive_pulse_hold_active;
     uint8_t stop_brake_active;
+    uint8_t drive_stop_edge;
 
     if (chassis_motor_state != CHASSIS_MOTOR_BALANCE_PID) {
         Chassis_ResetBalancePid();
@@ -983,6 +987,9 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
     mode_target_velocity_mps = target_velocity_mps;
     mode_bias_target_deg = mode_command.bias_deg;
     drive_bias_mode = mode_command.drive_enabled;
+    drive_stop_edge = ((balance_last_drive_enabled != 0U) &&
+                       (drive_bias_mode == 0U)) ? 1U : 0U;
+    balance_last_drive_enabled = drive_bias_mode;
     if (drive_bias_mode != 0U) {
         balance_mode_bias_slew_deg =
             Chassis_StepTowards(
@@ -1198,7 +1205,7 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
     */
     stop_brake_active = 0U;
 #if BALANCE_MODE_STOP_BRAKE_ENABLE
-    if (chassis_mode == CHASSIS_MODE_STAND) {
+    if (drive_bias_mode == 0U) {
         float stop_brake_abs_v_mps = Chassis_AbsF(measured_velocity_mps);
 
         if ((balance_stop_brake_dir != 0.0f) &&
@@ -1207,6 +1214,14 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
             balance_stop_brake_timer_sec = 0.0f;
             balance_stop_brake_lowv_timer_sec = 0.0f;
             balance_stop_brake_dir = 0.0f;
+        }
+
+        if ((drive_stop_edge != 0U) &&
+            (stop_brake_abs_v_mps >= BALANCE_MODE_STOP_BRAKE_OFF_MPS)) {
+            balance_stop_brake_dir =
+                (measured_velocity_mps >= 0.0f) ? 1.0f : -1.0f;
+            balance_stop_brake_timer_sec = BALANCE_MODE_STOP_BRAKE_TIME_SEC;
+            balance_stop_brake_lowv_timer_sec = 0.0f;
         }
 
         if (stop_brake_abs_v_mps >= BALANCE_MODE_STOP_BRAKE_LOCK_ON_MPS) {
@@ -1223,7 +1238,7 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
         balance_stop_brake_dir = 0.0f;
     }
 #endif
-    if ((chassis_mode == CHASSIS_MODE_STAND) &&
+    if ((drive_bias_mode == 0U) &&
         (balance_stop_brake_timer_sec > 0.0f) &&
         (balance_stop_brake_dir != 0.0f)) {
         balance_stop_brake_timer_sec =
