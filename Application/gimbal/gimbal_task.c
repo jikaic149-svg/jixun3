@@ -1405,6 +1405,10 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
     } else {
         theta_ref_slew_deg_per_sec =
             BALANCE_PID_SPEED_THETA_REF_SLEW_DEG_PER_SEC;
+        if (drive_bias_mode != 0U) {
+            theta_ref_slew_deg_per_sec =
+                BALANCE_MODE_DRIVE_THETA_REF_SLEW_DEG_PER_SEC;
+        }
 #if BALANCE_MODE_STOP_BRAKE_ENABLE
         if (stop_brake_active != 0U) {
             theta_ref_slew_deg_per_sec =

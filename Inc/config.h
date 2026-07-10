@@ -203,7 +203,7 @@
 #define BALANCE_PID_ANGLE_KP_RPM_PER_DEG    100.00f
 #define BALANCE_PID_ANGLE_KI_RPM_PER_DEG_S  0.0f
 /* 顶部质量升高使摆更慢(自然频率下降),相位裕度变宽,D 小步上调压顶部动量;出现高频细抖先回 0.65 */
-#define BALANCE_PID_RATE_KD_RPM_PER_DPS     0.300f
+#define BALANCE_PID_RATE_KD_RPM_PER_DPS     0.350f
 #define BALANCE_POSITION_KP_DEG_PER_M       0.30f
 /*
  * 21:12 数据:Kv=5.0 越过稳定边界——stop 后 stand 慢速极限环(±0.1m/s
@@ -230,10 +230,11 @@
 #define BALANCE_PID_ACCEL_ANGLE_WEIGHT      0.0f
 #define BALANCE_PID_WHEEL_SPEED_DEADBAND_MPS 0.010f
 #define BALANCE_MODE_VELOCITY_RAMP_MPS_PER_SEC 0.15f
-#define BALANCE_MODE_DRIVE_SPEED_KP_DEG_PER_MPS 15.00f
-#define BALANCE_MODE_DRIVE_SPEED_KI_DEG_PER_M_S 0.80f
+#define BALANCE_MODE_DRIVE_SPEED_KP_DEG_PER_MPS 10.00f
+#define BALANCE_MODE_DRIVE_SPEED_KI_DEG_PER_M_S 1.20f
 #define BALANCE_MODE_DRIVE_SPEED_INTEGRAL_LIMIT_M_S 0.50f
 #define BALANCE_MODE_DRIVE_THETA_REF_LIMIT_DEG 1.60f
+#define BALANCE_MODE_DRIVE_THETA_REF_SLEW_DEG_PER_SEC 8.0f
 /*
  * 前进/后退不再使用固定开环 bias(巡航速度 = (bias-摩擦角-零点误差)/Kv,
  * 摩擦(±1.4deg)和零点漂移都比 bias 本身大,只能"不走或冲")。
@@ -401,7 +402,7 @@
 #define TRACKING_SHARP_TURN_VELOCITY_MPS    0.035f
 /* Course order: A start crossbar -> center target marker -> B finish crossbar. */
 #define TRACKING_BLOCK_BLACK_COUNT_MIN      7U
-#define TRACKING_TARGET_BLOCK_BLACK_COUNT_MIN 5U
+#define TRACKING_TARGET_BLOCK_BLACK_COUNT_MIN 7U
 #define TRACKING_START_BLOCK_CONFIRM_MS     0U
 #define TRACKING_START_BLOCK_EXIT_MS        300U
 #define TRACKING_TARGET_BLOCK_CONFIRM_MS    0U

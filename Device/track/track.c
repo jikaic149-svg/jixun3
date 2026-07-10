@@ -8,12 +8,12 @@
 
 static Track_Instance *track_bound_inst = NULL;
 
-/* 2026-07-10 daylight VOFA calibration; black tape is high ADC. */
+/* 2026-07-10 daylight VOFA calibration at the normal running height. */
 static const uint16_t TRACK_WHITE_REFERENCE[8] = {
-    416, 802, 599, 726, 454, 508, 772, 377
+    1286, 1463, 1166, 1228, 993, 1051, 1326, 1079
 };
 static const uint16_t TRACK_BLACK_REFERENCE[8] = {
-    1854, 2237, 2307, 2507, 2259, 2093, 2125, 1521
+    2783, 2857, 2718, 2773, 2681, 2738, 2836, 2657
 };
 static const float TRACK_BLACK_DETECT_RATIO = 0.30f;
 static const float TRACK_WEIGHTS[8] = {
