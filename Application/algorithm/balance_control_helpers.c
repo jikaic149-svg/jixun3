@@ -315,6 +315,16 @@ uint8_t BalanceControl_StopZeroCrossed(float velocity_mps,
     return ((velocity_mps * direction) <= 0.0f) ? 1U : 0U;
 }
 
+float BalanceControl_StopCaptureDirection(float velocity_mps,
+                                          float minimum_velocity_mps)
+{
+    if (balance_helpers_absf(velocity_mps) <
+        balance_helpers_absf(minimum_velocity_mps)) {
+        return 0.0f;
+    }
+    return (velocity_mps >= 0.0f) ? 1.0f : -1.0f;
+}
+
 uint8_t BalanceControl_StopReboundConfirmed(float velocity_mps,
                                             float dt_sec,
                                             float rebound_velocity_mps,

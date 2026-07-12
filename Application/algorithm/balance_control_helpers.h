@@ -78,6 +78,9 @@ uint8_t BalanceControl_StopZeroCrossed(float velocity_mps,
                                        float entry_direction,
                                        float max_cross_velocity_mps);
 
+float BalanceControl_StopCaptureDirection(float velocity_mps,
+                                          float minimum_velocity_mps);
+
 uint8_t BalanceControl_StopReboundConfirmed(float velocity_mps,
                                             float dt_sec,
                                             float rebound_velocity_mps,

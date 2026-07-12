@@ -411,6 +411,16 @@ static void test_stop_zero_cross_capture(void)
           "an implausibly large sign jump must not release braking");
     CHECK(BalanceControl_StopZeroCrossed(0.0f, 0.0f, 0.025f) == 0U,
           "a stop without an entry direction must use quiet confirmation");
+
+    check_near(BalanceControl_StopCaptureDirection(0.019f, 0.020f),
+               0.0f,
+               "sub-threshold stop motion must not capture noisy direction");
+    check_near(BalanceControl_StopCaptureDirection(0.026f, 0.020f),
+               1.0f,
+               "late forward motion must arm a near-zero stop");
+    check_near(BalanceControl_StopCaptureDirection(-0.026f, 0.020f),
+               -1.0f,
+               "late reverse motion must arm a near-zero stop");
 }
 
 int main(void)

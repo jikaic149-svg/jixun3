@@ -1514,11 +1514,27 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
             balance_stop_rebound_timer_sec = 0.0f;
             balance_stop_rebound_candidate_dir = 0.0f;
             balance_stop_position_hold_armed = 0U;
-            if (stop_brake_abs_v_mps >=
-                BALANCE_MODE_STOP_BRAKE_EDGE_MIN_MPS) {
-                balance_stop_brake_dir =
-                    (measured_velocity_mps >= 0.0f) ? 1.0f : -1.0f;
-                balance_stop_brake_entry_dir = balance_stop_brake_dir;
+            balance_stop_brake_entry_dir =
+                BalanceControl_StopCaptureDirection(
+                    measured_velocity_mps,
+                    BALANCE_MODE_STOP_BRAKE_EDGE_MIN_MPS);
+            if (balance_stop_brake_entry_dir != 0.0f) {
+                balance_stop_brake_dir = balance_stop_brake_entry_dir;
+                balance_stop_brake_timer_sec =
+                    BALANCE_MODE_STOP_BRAKE_TIME_SEC;
+            }
+        }
+
+        /* A near-zero stop edge may not have a reliable direction yet. If
+         * the body disturbance subsequently creates real motion, arm from
+         * that direction so its next zero crossing can enter HOLD. */
+        if (balance_stop_brake_entry_dir == 0.0f) {
+            balance_stop_brake_entry_dir =
+                BalanceControl_StopCaptureDirection(
+                    measured_velocity_mps,
+                    BALANCE_MODE_STOP_BRAKE_EDGE_MIN_MPS);
+            if (balance_stop_brake_entry_dir != 0.0f) {
+                balance_stop_brake_dir = balance_stop_brake_entry_dir;
                 balance_stop_brake_timer_sec =
                     BALANCE_MODE_STOP_BRAKE_TIME_SEC;
             }
