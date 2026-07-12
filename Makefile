@@ -75,6 +75,7 @@ mode/mode_turn_left.c \
 mode/mode_turn_right.c \
 mode/mode_tracking.c \
 mode/mode_square_tracking.c \
+mode/mode_target_aim.c \
 mode/mode_gimbal.c \
 Application/algorithm/attitude_algorithm.c \
 Application/algorithm/crc16.c \

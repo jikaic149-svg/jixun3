@@ -12,6 +12,7 @@ typedef enum {
 typedef struct {
     float target_offset_deg;
     float target_angle_deg;
+    float chassis_speed_feedforward_deg;
     float error_deg;
     float yaw_current_a;
     uint8_t drive_enabled;
@@ -22,6 +23,11 @@ void Mode_GimbalSet(GimbalMode_e mode);
 GimbalMode_e Mode_GimbalGet(void);
 void Mode_GimbalSetTargetOffsetDeg(float offset_deg);
 void Mode_GimbalAddTargetOffsetDeg(float delta_deg);
+void Mode_GimbalSetTargetFromEncoderDeg(float encoder_angle_deg,
+                                        float correction_deg);
+void Mode_GimbalSetChassisSpeedFeedforward(float velocity_mps,
+                                           uint8_t enabled);
+void Mode_GimbalResetIntegral(void);
 void Mode_GimbalUpdate(float encoder_angle_deg,
                        float encoder_speed_rpm,
                        uint8_t feedback_ready,

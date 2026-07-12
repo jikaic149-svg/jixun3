@@ -28,6 +28,7 @@
 #include "chassis_serial_cmd.h"
 #include "gimbal_task.h"
 #include "mode_control.h"
+#include "mode_gimbal.h"
 
 /* BSP 层 (仅用于 Init 时注入函数指针) */
 #include "bsp_spi.h"
@@ -120,6 +121,7 @@ static uint8_t vofa_cmd_pop(uint8_t *line, uint8_t *len);
 
 #define VOFA_CMD_BUF_LEN    32U
 #define VOFA_CMD_QUEUE_LEN  16U
+#define VOFA_TARGET_AIM_CHANNEL_COUNT 24U
 
 static volatile uint8_t vofa_cmd_rx_len = 0U;
 static volatile uint8_t vofa_cmd_rx_discard = 0U;
@@ -626,6 +628,74 @@ void INS_Task(void *argument)
                                     "yaw_enable_queue_ok,yaw_enable_queue_fail,yaw_rx_count,yaw_motor_rx_count,yaw_enabled,last_can_id,last_can_dlc,can_rx_count,yaw_angle_deg,yaw_speed_rpm,yaw_feedback_a,yaw_feedback_fresh\r\n");
                 vofa_header_sent = 1U;
             }
+#elif VOFA_DEBUG_STAGE == VOFA_DEBUG_STAGE_TARGET_AIM
+            static uint32_t vofa_vision_last_frame = 0U;
+            static uint32_t vofa_vision_last_tick = 0U;
+            Track_Snapshot_t vofa_track_snapshot;
+            ModeCommand_t vofa_mode_command;
+            GimbalCommand_t vofa_gimbal_command;
+            int16_t vofa_vision_dx = 0;
+            int16_t vofa_vision_dy = 0;
+            uint8_t vofa_vision_valid = 0U;
+            float vofa_track_error = TRACK_LOST_LINE;
+            float vofa_track_black_mask = 0.0f;
+            float vofa_track_black_count = 0.0f;
+            uint32_t vofa_vision_frame =
+                INS_GetVisionTarget(&vofa_vision_dx,
+                                    &vofa_vision_dy,
+                                    &vofa_vision_valid);
+
+            if (vofa_vision_frame != vofa_vision_last_frame) {
+                vofa_vision_last_frame = vofa_vision_frame;
+                if (vofa_vision_valid != 0U) {
+                    vofa_vision_last_tick = now_tick;
+                }
+            }
+            if (Track_GetSnapshot(&g_track, &vofa_track_snapshot) != 0U) {
+                vofa_track_error = vofa_track_snapshot.error;
+                vofa_track_black_mask =
+                    (float)vofa_track_snapshot.black_mask;
+                vofa_track_black_count =
+                    (float)vofa_track_snapshot.black_count;
+            }
+            Mode_GetCommand(&vofa_mode_command);
+            Mode_GimbalGetCommand(&vofa_gimbal_command);
+            float vofa_channels[VOFA_TARGET_AIM_CHANNEL_COUNT] = {
+                (float)vofa_vision_dx,
+                (float)vofa_vision_dy,
+                (float)vofa_vision_valid,
+                (float)(now_tick - vofa_vision_last_tick),
+                (float)chassis_mode,
+                (float)Mode_TargetAimGetPhase(),
+                (float)Mode_GimbalGet(),
+                vofa_gimbal_command.target_angle_deg,
+                gimbal_yaw_motor.angle,
+                vofa_gimbal_command.error_deg,
+                gimbal_yaw_motor.speed_can_rpm,
+                vofa_gimbal_command.yaw_current_a,
+                gimbal_yaw_motor.current,
+                (float)Motor_FeedbackReady(
+                    &gimbal_yaw_motor,
+                    now_tick,
+                    pdMS_TO_TICKS(GIMBAL_YAW_FEEDBACK_TIMEOUT_MS)),
+                vofa_mode_command.velocity_mps,
+                balance_pid_velocity_mps,
+                (float)balance_motion_state,
+                balance_pid_theta_ref_deg,
+                balance_pid_theta_deg,
+                vofa_mode_command.turn_rpm,
+                vofa_track_error,
+                vofa_track_black_mask,
+                vofa_track_black_count,
+                (float)gimbal_laser_on
+            };
+            if (vofa_header_sent == 0U) {
+                if (Vofa_SendText(
+                        &g_vofa,
+                        "dx,dy,valid,age_ms,mode,phase,gmode,yaw_ref,yaw,yaw_err,yaw_rpm,yaw_cmd_a,yaw_fb_a,yaw_fresh,v_ref,v,motion,theta_ref,theta,turn_ref,track_err,mask,count,laser\r\n")) {
+                    vofa_header_sent = 1U;
+                }
+            }
 #else
             float vofa_balance_angle_deg = balance_pid_theta_deg;
             float vofa_balance_angle_reference_deg = balance_pid_theta_ref_deg;
@@ -690,7 +760,8 @@ void INS_Task(void *argument)
             vofa_last_send_tick = now_tick;
             (void)Vofa_SendCsvFloat(&g_vofa,
                                     vofa_channels,
-                                    VOFA_OUTPUT_CHANNEL_COUNT);
+                                    (uint8_t)(sizeof(vofa_channels) /
+                                              sizeof(vofa_channels[0])));
         }
 #endif
 

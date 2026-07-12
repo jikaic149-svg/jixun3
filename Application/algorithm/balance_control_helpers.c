@@ -140,6 +140,32 @@ float BalanceControl_ApplyContinuousDeadband(float value, float deadband)
     return 0.0f;
 }
 
+uint8_t BalanceControl_QuietConfirmed(uint8_t quiet,
+                                      float dt_sec,
+                                      float confirm_sec,
+                                      float *confirm_timer_sec)
+{
+    if (confirm_timer_sec == 0) {
+        return 0U;
+    }
+    if (quiet == 0U) {
+        *confirm_timer_sec = 0.0f;
+        return 0U;
+    }
+    if (confirm_sec <= 0.0f) {
+        *confirm_timer_sec = 0.0f;
+        return 1U;
+    }
+    if (dt_sec > 0.0f) {
+        if (*confirm_timer_sec >= (confirm_sec - dt_sec)) {
+            *confirm_timer_sec = confirm_sec;
+        } else {
+            *confirm_timer_sec += dt_sec;
+        }
+    }
+    return (*confirm_timer_sec >= confirm_sec) ? 1U : 0U;
+}
+
 float BalanceControl_UpdateActualBaseBlend(float blend,
                                            float dt_sec,
                                            float blend_per_sec,

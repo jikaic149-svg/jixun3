@@ -24,6 +24,8 @@ static volatile uint8_t mode_motion_settled = 0U;
 static volatile float mode_actual_velocity_mps = 0.0f;
 static volatile float mode_chassis_yaw_deg = 0.0f;
 static volatile uint8_t mode_laser_safe = 0U;
+static volatile uint8_t mode_target_vision_ready = 0U;
+static volatile uint8_t mode_target_drive_enabled = 0U;
 static uint32_t mode_last_update_ms = 0U;
 
 static ModeTrackingInput_t mode_tracking_input_snapshot(void)
@@ -88,9 +90,12 @@ void Mode_Init(void)
     mode_actual_velocity_mps = 0.0f;
     mode_chassis_yaw_deg = 0.0f;
     mode_laser_safe = 0U;
+    mode_target_vision_ready = 0U;
+    mode_target_drive_enabled = 0U;
     mode_last_update_ms = 0U;
     Mode_TrackingReset();
     Mode_SquareTrackingReset();
+    Mode_TargetAimReset();
 }
 
 void Mode_Set(ChassisMode_e mode)
@@ -102,14 +107,23 @@ void Mode_Set(ChassisMode_e mode)
     if (mode_active != mode) {
         mode_motion_settled = 0U;
         mode_laser_safe = 0U;
+        mode_target_vision_ready = 0U;
+        if ((mode_active == CHASSIS_MODE_TARGET_AIM) &&
+            (mode != CHASSIS_MODE_TARGET_AIM)) {
+            mode_target_drive_enabled = 0U;
+        }
         if ((mode == CHASSIS_MODE_TRACKING) ||
-            (mode == CHASSIS_MODE_SQUARE_TRACKING)) {
+            (mode == CHASSIS_MODE_SQUARE_TRACKING) ||
+            (mode == CHASSIS_MODE_TARGET_AIM)) {
             ModeTrackingInput_t input = mode_tracking_input_snapshot();
 
             if (mode == CHASSIS_MODE_TRACKING) {
                 Mode_TrackingReset();
-            } else {
+            } else if (mode == CHASSIS_MODE_SQUARE_TRACKING) {
                 Mode_SquareTrackingReset();
+            } else {
+                Mode_TrackingReset();
+                Mode_TargetAimReset();
             }
             tracking_consumed_generation = input.generation;
             tracking_wait_for_new_frame = 1U;
@@ -162,6 +176,7 @@ void Mode_Update(uint32_t now_ms)
         break;
     case CHASSIS_MODE_TRACKING:
     case CHASSIS_MODE_SQUARE_TRACKING:
+    case CHASSIS_MODE_TARGET_AIM:
     {
         ModeTrackingInput_t input = mode_tracking_input_snapshot();
         uint8_t new_frame =
@@ -188,13 +203,18 @@ void Mode_Update(uint32_t now_ms)
             Mode_TrackingBuild(&command, error, input.black_count,
                                sensor_flags, mode_laser_safe,
                                mode_actual_velocity_mps, dt_sec);
-        } else {
+        } else if (mode_active == CHASSIS_MODE_SQUARE_TRACKING) {
             Mode_SquareTrackingBuild(&command, error, input.black_count,
                                      input.black_mask,
                                      sensor_flags, mode_motion_settled,
                                      mode_actual_velocity_mps,
                                      mode_chassis_yaw_deg,
                                      dt_sec);
+        } else {
+            Mode_TargetAimBuild(&command, error, input.black_count,
+                                input.black_mask, sensor_flags,
+                                mode_target_vision_ready,
+                                mode_target_drive_enabled, dt_sec);
         }
         break;
     }
@@ -233,6 +253,18 @@ void Mode_SetChassisYaw(float yaw_deg)
 void Mode_SetLaserSafe(uint8_t safe)
 {
     mode_laser_safe = (safe != 0U) ? 1U : 0U;
+}
+
+void Mode_SetTargetVisionReady(uint8_t ready)
+{
+    if (mode_active == CHASSIS_MODE_TARGET_AIM) {
+        mode_target_vision_ready = (ready != 0U) ? 1U : 0U;
+    }
+}
+
+void Mode_SetTargetDriveEnabled(uint8_t enabled)
+{
+    mode_target_drive_enabled = (enabled != 0U) ? 1U : 0U;
 }
 
 void Mode_TrackingSetSample(float error, uint8_t black_count,

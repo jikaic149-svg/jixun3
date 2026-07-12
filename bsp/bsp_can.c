@@ -137,7 +137,7 @@ void Motor_Disable(uint8_t id) {
   * @brief  设置电机电流
   * @param  current: 目标电流 [-10A, 10A]
   */
-void Motor_SetCurrent(uint8_t id, float current) {
+HAL_StatusTypeDef Motor_TrySetCurrent(uint8_t id, float current) {
     current *= motor_current_sign(id);
 
     // 限幅
@@ -145,7 +145,11 @@ void Motor_SetCurrent(uint8_t id, float current) {
     if (current < -10.0f) current = -10.0f;
     
     int16_t value = (int16_t)(current / 10.0f * 32767.0f);
-    (void)CAN_SendCommand(id, 0x03, value);
+    return CAN_SendCommand(id, 0x03, value);
+}
+
+void Motor_SetCurrent(uint8_t id, float current) {
+    (void)Motor_TrySetCurrent(id, current);
 }
 
 /**

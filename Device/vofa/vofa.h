@@ -9,7 +9,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#define VOFA_MAX_CHANNELS         16U
+#define VOFA_MAX_CHANNELS         24U
 #define VOFA_JUSTFLOAT_TAIL_SIZE  4U
 #define VOFA_JUSTFLOAT_BUF_SIZE   ((VOFA_MAX_CHANNELS * sizeof(float)) + VOFA_JUSTFLOAT_TAIL_SIZE)
 #define VOFA_TEXT_BUF_SIZE        256U

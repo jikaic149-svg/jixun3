@@ -32,6 +32,11 @@ float BalanceControl_ApplyIntegralAction(
 float BalanceControl_ApplyContinuousDeadband(float value,
                                              float deadband);
 
+uint8_t BalanceControl_QuietConfirmed(uint8_t quiet,
+                                      float dt_sec,
+                                      float confirm_sec,
+                                      float *confirm_timer_sec);
+
 float BalanceControl_UpdateActualBaseBlend(float blend,
                                            float dt_sec,
                                            float blend_per_sec,

@@ -105,9 +105,9 @@
 #define WHEEL_ZERO_CURRENT_KEEPALIVE  1
 #define WHEEL_SAFE_TASK_PERIOD_MS     1U
 
-/* One-axis QD4310 yaw gimbal. Vision will feed target offsets later. */
-#define GIMBAL_YAW_AUTO_HOLD_ENABLE       1U
-#define GIMBAL_YAW_CURRENT_COMMAND_ENABLE 0U
+/* One-axis QD4310 yaw gimbal. It is energized only by target-aim mode. */
+#define GIMBAL_YAW_AUTO_HOLD_ENABLE       0U
+#define GIMBAL_YAW_CURRENT_COMMAND_ENABLE 1U
 #define GIMBAL_YAW_ENABLE_RETRY_MS        100U
 #define GIMBAL_YAW_FEEDBACK_TIMEOUT_MS    100U
 #define GIMBAL_YAW_MOTOR_SPEED_KP         0.00300f
@@ -123,16 +123,30 @@
 #define GIMBAL_YAW_CONTROL_SIGN           1.0f
 #define GIMBAL_YAW_CONTROL_DT_SEC          0.001f
 #define GIMBAL_YAW_SOFT_LIMIT_DEG         120.0f
-#define GIMBAL_YAW_MAX_ERROR_DEG          20.0f
-#define GIMBAL_YAW_DEADBAND_DEG           0.2f
-#define GIMBAL_YAW_INTEGRAL_ZONE_DEG      3.0f
-#define GIMBAL_YAW_KP_A_PER_DEG           0.050f
-#define GIMBAL_YAW_KI_A_PER_DEG_S         0.200f
-#define GIMBAL_YAW_KD_A_PER_RPM           0.001f
-#define GIMBAL_YAW_INTEGRAL_LIMIT_A       0.30f
+#define GIMBAL_YAW_MAX_ERROR_DEG          8.0f
+#define GIMBAL_YAW_DEADBAND_DEG           0.35f
+#define GIMBAL_YAW_INTEGRAL_ZONE_DEG      2.0f
+#define GIMBAL_YAW_KP_A_PER_DEG           0.036f
+#define GIMBAL_YAW_KI_A_PER_DEG_S         0.009f
+#define GIMBAL_YAW_KD_A_PER_RPM           0.0050f
+#define GIMBAL_YAW_INTEGRAL_LIMIT_A       0.015f
 /* Bring-up clamp; raise only after encoder/current polarity is verified. */
 #define GIMBAL_YAW_CURRENT_LIMIT_A        0.30f
+#define GIMBAL_YAW_CURRENT_SLEW_A_PER_SEC 2.0f
 #define GIMBAL_YAW_SPEED_LPF_ALPHA        0.30f
+#define GIMBAL_YAW_CHASSIS_SPEED_FF_DEG_PER_MPS 1.50f
+#define GIMBAL_YAW_CHASSIS_SPEED_FF_LIMIT_DEG   0.20f
+#define GIMBAL_YAW_COMMAND_PERIOD_MS      5U
+#define GIMBAL_YAW_ZERO_RETRY_COUNT       5U
+
+/* 320x240 MaixCAM2 visual-yaw conversion and freshness gates. */
+#define VISION_YAW_SIGN                   (-1.0f)
+#define VISION_YAW_FOCAL_LENGTH_PX         270.0f
+#define VISION_YAW_DEADBAND_PX             2
+#define VISION_YAW_FRAME_TIMEOUT_MS        150U
+#define VISION_YAW_CURRENT_STOP_TIMEOUT_MS 1000U
+#define VISION_YAW_MAX_CORRECTION_DEG      8.0f
+#define VISION_YAW_CAPTURE_LIMIT_DEG       45.0f
 
 /* 离地左轮 ESO+PI 轮速测试：上电默认急停，按键授权后才输出非零电流。 */
 #define WHEEL_SPEED_TEST_ENABLE             0U
@@ -247,6 +261,7 @@
 #define BALANCE_MODE_START_ASSIST_EXIT_SEC   0.05f
 #define BALANCE_MODE_START_ASSIST_INTEGRATOR_GATE_DEG 0.02f
 #define BALANCE_MODE_START_ASSIST_TIMEOUT_SEC 2.0f
+#define BALANCE_MODE_START_RETRY_QUIET_SEC  0.30f
 #define BALANCE_MODE_BRAKE_REF_DONE_MPS      0.005f
 #define BALANCE_MODE_BRAKE_V_DONE_MPS        0.020f
 #define BALANCE_MODE_BRAKE_SETTLE_SEC        0.15f
@@ -458,6 +473,16 @@
 #define TRACKING_LOST_ERROR                 7.5f
 #define TRACKING_MIN_SPEED_RATIO            0.875f
 
+/* Touch-started target task: calibrate, follow a straight line, then stop on
+ * a continuously observed all-white sensor frame. */
+#define TARGET_AIM_LINE_CONFIRM_MS          60U
+#define TARGET_AIM_WHITE_CONFIRM_MS         40U
+#define TARGET_AIM_LINE_BLACK_COUNT_MAX     5U
+#define TARGET_AIM_TURN_LIMIT_RPM           8.0f
+#define TARGET_AIM_WIDE_START_PROBE_VELOCITY_MPS 0.05f
+#define TARGET_AIM_WIDE_START_PROBE_MAX_MS  1000U
+#define TARGET_AIM_WIDE_FOLLOW_PROBE_MAX_MS 1000U
+
 /* Independent one-lap square line task (mode 6). Course tracking mode 5 keeps
  * its own marker/laser state machine and does not consume these parameters. */
 #define SQUARE_TRACKING_BASE_VELOCITY_MPS       0.08f
@@ -648,7 +673,8 @@
 #define VOFA_DEBUG_STAGE_BALANCE_CASCADE 3U
 #define VOFA_DEBUG_STAGE_TRACK_ADC      4U
 #define VOFA_DEBUG_STAGE_YAW_CAN        5U
-#define VOFA_DEBUG_STAGE                VOFA_DEBUG_STAGE_TRACK_ADC
+#define VOFA_DEBUG_STAGE_TARGET_AIM     6U
+#define VOFA_DEBUG_STAGE                VOFA_DEBUG_STAGE_TARGET_AIM
 #if VOFA_OUTPUT_MODE == VOFA_OUTPUT_MODE_ENCODER
 #if VOFA_DEBUG_STAGE == VOFA_DEBUG_STAGE_MOTOR_FEEDBACK
 #define VOFA_OUTPUT_CHANNEL_COUNT    12U
@@ -660,6 +686,8 @@
 #define VOFA_OUTPUT_CHANNEL_COUNT    16U
 #elif VOFA_DEBUG_STAGE == VOFA_DEBUG_STAGE_YAW_CAN
 #define VOFA_OUTPUT_CHANNEL_COUNT    12U
+#elif VOFA_DEBUG_STAGE == VOFA_DEBUG_STAGE_TARGET_AIM
+#define VOFA_OUTPUT_CHANNEL_COUNT    24U
 #elif VOFA_DEBUG_STAGE == VOFA_DEBUG_STAGE_BALANCE_CASCADE
 #define VOFA_OUTPUT_CHANNEL_COUNT    16U
 #else

@@ -14,6 +14,7 @@ typedef enum {
     CHASSIS_MODE_TURN_RIGHT,
     CHASSIS_MODE_TRACKING,
     CHASSIS_MODE_SQUARE_TRACKING,
+    CHASSIS_MODE_TARGET_AIM,
     CHASSIS_MODE_COUNT
 } ChassisMode_e;
 
@@ -45,6 +46,14 @@ typedef enum {
     MODE_SQUARE_PHASE_FAULT_HOLD
 } ModeSquarePhase_e;
 
+typedef enum {
+    MODE_TARGET_AIM_PHASE_WAIT_CALIBRATION = 0,
+    MODE_TARGET_AIM_PHASE_STATIC_AIM,
+    MODE_TARGET_AIM_PHASE_WAIT_LINE,
+    MODE_TARGET_AIM_PHASE_FOLLOW_LINE,
+    MODE_TARGET_AIM_PHASE_AIM_HOLD
+} ModeTargetAimPhase_e;
+
 typedef struct {
     float velocity_mps;
     float bias_deg;
@@ -63,11 +72,14 @@ void Mode_SetMotionSettled(uint8_t settled);
 void Mode_SetActualVelocity(float velocity_mps);
 void Mode_SetChassisYaw(float yaw_deg);
 void Mode_SetLaserSafe(uint8_t safe);
+void Mode_SetTargetVisionReady(uint8_t ready);
+void Mode_SetTargetDriveEnabled(uint8_t enabled);
 void Mode_TrackingSetSample(float error, uint8_t black_count,
                             uint8_t black_mask, uint32_t now_ms);
 void Mode_TrackingSetError(float error, uint8_t black_count, uint32_t now_ms);
 ModeTrackingPhase_e Mode_TrackingGetPhase(void);
 ModeSquarePhase_e Mode_SquareTrackingGetPhase(void);
 uint8_t Mode_SquareTrackingGetCornerCount(void);
+ModeTargetAimPhase_e Mode_TargetAimGetPhase(void);
 
 #endif /* MODE_CONTROL_H */

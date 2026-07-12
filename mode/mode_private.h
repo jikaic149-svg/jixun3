@@ -22,6 +22,10 @@ void Mode_TrackingBuild(ModeCommand_t *command,
                         float actual_velocity_mps,
                         float dt_sec);
 void Mode_TrackingReset(void);
+void Mode_TrackingBuildLineFollow(ModeCommand_t *command,
+                                  float error,
+                                  uint8_t sensor_flags,
+                                  float dt_sec);
 void Mode_SquareTrackingBuild(ModeCommand_t *command,
                               float error,
                               uint8_t black_count,
@@ -32,5 +36,14 @@ void Mode_SquareTrackingBuild(ModeCommand_t *command,
                               float chassis_yaw_deg,
                               float dt_sec);
 void Mode_SquareTrackingReset(void);
+void Mode_TargetAimBuild(ModeCommand_t *command,
+                         float error,
+                         uint8_t black_count,
+                         uint8_t black_mask,
+                         uint8_t sensor_flags,
+                         uint8_t vision_ready,
+                         uint8_t drive_enabled,
+                         float dt_sec);
+void Mode_TargetAimReset(void);
 
 #endif /* MODE_PRIVATE_H */

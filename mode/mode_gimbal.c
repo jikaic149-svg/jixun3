@@ -8,8 +8,10 @@ static GimbalMode_e gimbal_mode = GIMBAL_MODE_RELAX;
 static GimbalCommand_t gimbal_command;
 static float gimbal_center_angle_deg = 0.0f;
 static float gimbal_target_offset_deg = 0.0f;
+static float gimbal_chassis_speed_feedforward_deg = 0.0f;
 static float gimbal_integral_a = 0.0f;
 static float gimbal_filtered_speed_rpm = 0.0f;
+static float gimbal_last_current_a = 0.0f;
 static uint8_t gimbal_center_valid = 0U;
 static uint8_t gimbal_capture_center = 0U;
 static uint8_t gimbal_speed_filter_ready = 0U;
@@ -56,8 +58,13 @@ static float gimbal_wrap_error(float error_deg)
 
 static void gimbal_clear_command(void)
 {
-    gimbal_command.target_offset_deg = gimbal_target_offset_deg;
-    gimbal_command.target_angle_deg = gimbal_center_angle_deg;
+    gimbal_command.target_offset_deg =
+        gimbal_target_offset_deg + gimbal_chassis_speed_feedforward_deg;
+    gimbal_command.target_angle_deg =
+        gimbal_wrap_angle(gimbal_center_angle_deg +
+                          gimbal_command.target_offset_deg);
+    gimbal_command.chassis_speed_feedforward_deg =
+        gimbal_chassis_speed_feedforward_deg;
     gimbal_command.error_deg = 0.0f;
     gimbal_command.yaw_current_a = 0.0f;
     gimbal_command.drive_enabled = 0U;
@@ -68,8 +75,10 @@ void Mode_GimbalInit(void)
     gimbal_mode = GIMBAL_MODE_RELAX;
     gimbal_center_angle_deg = 0.0f;
     gimbal_target_offset_deg = 0.0f;
+    gimbal_chassis_speed_feedforward_deg = 0.0f;
     gimbal_integral_a = 0.0f;
     gimbal_filtered_speed_rpm = 0.0f;
+    gimbal_last_current_a = 0.0f;
     gimbal_center_valid = 0U;
     gimbal_capture_center = 0U;
     gimbal_speed_filter_ready = 0U;
@@ -88,9 +97,11 @@ void Mode_GimbalSet(GimbalMode_e mode)
     gimbal_mode = mode;
     gimbal_integral_a = 0.0f;
     gimbal_speed_filter_ready = 0U;
+    gimbal_chassis_speed_feedforward_deg = 0.0f;
 
     if (mode == GIMBAL_MODE_RELAX) {
         gimbal_capture_center = 0U;
+        gimbal_last_current_a = 0.0f;
         gimbal_clear_command();
     } else if (mode == GIMBAL_MODE_HOLD) {
         gimbal_target_offset_deg = 0.0f;
@@ -116,6 +127,47 @@ void Mode_GimbalAddTargetOffsetDeg(float delta_deg)
     Mode_GimbalSetTargetOffsetDeg(gimbal_target_offset_deg + delta_deg);
 }
 
+void Mode_GimbalSetTargetFromEncoderDeg(float encoder_angle_deg,
+                                        float correction_deg)
+{
+    float target_angle_deg;
+    float target_offset_deg;
+
+    encoder_angle_deg = gimbal_wrap_angle(encoder_angle_deg);
+    correction_deg =
+        gimbal_limit(correction_deg, VISION_YAW_MAX_CORRECTION_DEG);
+    if ((gimbal_capture_center != 0U) || (gimbal_center_valid == 0U)) {
+        gimbal_center_angle_deg = encoder_angle_deg;
+        gimbal_center_valid = 1U;
+        gimbal_capture_center = 0U;
+        gimbal_target_offset_deg = 0.0f;
+    }
+
+    target_angle_deg = gimbal_wrap_angle(encoder_angle_deg + correction_deg);
+    target_offset_deg =
+        gimbal_wrap_error(target_angle_deg - gimbal_center_angle_deg);
+    target_offset_deg =
+        gimbal_limit(target_offset_deg, VISION_YAW_CAPTURE_LIMIT_DEG);
+    Mode_GimbalSetTargetOffsetDeg(target_offset_deg);
+}
+
+void Mode_GimbalResetIntegral(void)
+{
+    gimbal_integral_a = 0.0f;
+}
+
+void Mode_GimbalSetChassisSpeedFeedforward(float velocity_mps,
+                                           uint8_t enabled)
+{
+    if ((enabled == 0U) || (gimbal_mode != GIMBAL_MODE_AIM)) {
+        gimbal_chassis_speed_feedforward_deg = 0.0f;
+        return;
+    }
+    gimbal_chassis_speed_feedforward_deg = gimbal_limit(
+        velocity_mps * GIMBAL_YAW_CHASSIS_SPEED_FF_DEG_PER_MPS,
+        GIMBAL_YAW_CHASSIS_SPEED_FF_LIMIT_DEG);
+}
+
 void Mode_GimbalUpdate(float encoder_angle_deg,
                        float encoder_speed_rpm,
                        uint8_t feedback_ready,
@@ -136,8 +188,11 @@ void Mode_GimbalUpdate(float encoder_angle_deg,
     }
 
     if ((feedback_ready == 0U) || (gimbal_mode == GIMBAL_MODE_RELAX)) {
+        gimbal_chassis_speed_feedforward_deg = 0.0f;
         gimbal_integral_a = 0.0f;
+        gimbal_last_current_a = 0.0f;
         gimbal_speed_filter_ready = 0U;
+        gimbal_clear_command();
         return;
     }
 
@@ -159,7 +214,9 @@ void Mode_GimbalUpdate(float encoder_angle_deg,
     }
 
     target_offset_deg = (gimbal_mode == GIMBAL_MODE_HOLD) ?
-                        0.0f : gimbal_target_offset_deg;
+                        0.0f :
+                        gimbal_target_offset_deg +
+                        gimbal_chassis_speed_feedforward_deg;
     target_angle_deg =
         gimbal_wrap_angle(gimbal_center_angle_deg + target_offset_deg);
     raw_error_deg =
@@ -175,11 +232,17 @@ void Mode_GimbalUpdate(float encoder_angle_deg,
         control_error_deg = 0.0f;
     }
 
-    if (gimbal_absf(raw_error_deg) > GIMBAL_YAW_INTEGRAL_ZONE_DEG) {
+    if (control_error_deg == 0.0f) {
+        gimbal_integral_a *= 0.90f;
+        if (gimbal_absf(gimbal_integral_a) < 0.0001f) {
+            gimbal_integral_a = 0.0f;
+        }
+    } else if (gimbal_absf(raw_error_deg) >
+               GIMBAL_YAW_INTEGRAL_ZONE_DEG) {
         gimbal_integral_a = 0.0f;
     } else {
         gimbal_integral_a +=
-            GIMBAL_YAW_KI_A_PER_DEG_S * raw_error_deg * dt_sec;
+            GIMBAL_YAW_KI_A_PER_DEG_S * control_error_deg * dt_sec;
         gimbal_integral_a =
             gimbal_limit(gimbal_integral_a, GIMBAL_YAW_INTEGRAL_LIMIT_A);
     }
@@ -191,9 +254,19 @@ void Mode_GimbalUpdate(float encoder_angle_deg,
         GIMBAL_YAW_CONTROL_SIGN;
     output_current_a =
         gimbal_limit(output_current_a, GIMBAL_YAW_CURRENT_LIMIT_A);
+    {
+        float max_step_a = GIMBAL_YAW_CURRENT_SLEW_A_PER_SEC * dt_sec;
+        float current_step_a = output_current_a - gimbal_last_current_a;
+
+        current_step_a = gimbal_limit(current_step_a, max_step_a);
+        output_current_a = gimbal_last_current_a + current_step_a;
+        gimbal_last_current_a = output_current_a;
+    }
 
     gimbal_command.target_offset_deg = target_offset_deg;
     gimbal_command.target_angle_deg = target_angle_deg;
+    gimbal_command.chassis_speed_feedforward_deg =
+        gimbal_chassis_speed_feedforward_deg;
     gimbal_command.error_deg = raw_error_deg;
     gimbal_command.yaw_current_a = output_current_a;
     gimbal_command.drive_enabled = 1U;

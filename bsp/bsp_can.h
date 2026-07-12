@@ -29,6 +29,7 @@ extern volatile uint32_t can_last_dlc;
 void CAN_Filter_Init(void);
 HAL_StatusTypeDef Motor_Enable(uint8_t id);
 void Motor_Disable(uint8_t id);
+HAL_StatusTypeDef Motor_TrySetCurrent(uint8_t id, float current);
 void Motor_SetCurrent(uint8_t id, float current);
 void Motor_SetAngle(uint8_t id, float angle);
 uint8_t Motor_FeedbackReady(const volatile Motor_Measure_t *motor,

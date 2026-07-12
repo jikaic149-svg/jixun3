@@ -153,7 +153,7 @@ static uint8_t cmd_parse_bias(const uint8_t *line, uint8_t len, float *bias_deg)
 
 static uint8_t cmd_mode_from_digit(uint8_t c, ChassisMode_e *mode)
 {
-    if ((mode == 0) || (c < '0') || (c > '6')) {
+    if ((mode == 0) || (c < '0') || (c > '7')) {
         return 0U;
     }
 
@@ -171,7 +171,8 @@ static uint8_t cmd_mode_from_word(const uint8_t *line,
     }
 
     if ((cmd_match_word(line, len, start, "stand") != 0U) ||
-        (cmd_match_word(line, len, start, "balance") != 0U)) {
+        (cmd_match_word(line, len, start, "balance") != 0U) ||
+        (cmd_match_word(line, len, start, "vision") != 0U)) {
         *mode = CHASSIS_MODE_STAND;
         return 1U;
     }
@@ -210,6 +211,12 @@ static uint8_t cmd_mode_from_word(const uint8_t *line,
         *mode = CHASSIS_MODE_SQUARE_TRACKING;
         return 1U;
     }
+    if ((cmd_match_word(line, len, start, "shoot") != 0U) ||
+        (cmd_match_word(line, len, start, "aim") != 0U) ||
+        (cmd_match_word(line, len, start, "target") != 0U)) {
+        *mode = CHASSIS_MODE_TARGET_AIM;
+        return 1U;
+    }
 
     return 0U;
 }
@@ -235,8 +242,8 @@ static uint8_t cmd_parse_mode(const uint8_t *line,
         return 1U;
     }
 
-    /* Bare 6 remains the legacy 6 RPM wheel-speed command. Square mode is
-     * selected explicitly with square, mode 6, or m6. */
+    /* Bare 6/7 remain wheel-speed commands. New task modes require a word,
+     * mode N, or mN so numeric telemetry cannot switch modes accidentally. */
     if ((line[i] <= '5') &&
         (cmd_mode_from_digit(line[i], mode) != 0U) &&
         (cmd_only_delimiters(line, len, (uint8_t)(i + 1U)) != 0U)) {
@@ -319,7 +326,8 @@ static uint8_t cmd_starts_mode_word(const uint8_t *line, uint8_t len)
     static const char *const words[] = {
         "stand", "balance", "forward", "go", "backward", "back",
         "reverse", "stop", "park", "left", "right", "track",
-        "tracking", "line", "square", "box"
+        "tracking", "line", "square", "box", "shoot", "aim",
+        "target", "vision"
     };
     uint8_t start = 0U;
 
@@ -341,6 +349,27 @@ static uint8_t cmd_starts_mode_word(const uint8_t *line, uint8_t len)
         }
     }
     return 0U;
+}
+
+static uint8_t cmd_is_static_target_word(const uint8_t *line, uint8_t len)
+{
+    uint8_t start = 0U;
+
+    while ((start < len) && (cmd_is_delimiter(line[start]) != 0U)) {
+        start++;
+    }
+    return ((cmd_match_word(line, len, start, "aim") != 0U) ||
+            (cmd_match_word(line, len, start, "target") != 0U)) ? 1U : 0U;
+}
+
+static uint8_t cmd_is_vision_word(const uint8_t *line, uint8_t len)
+{
+    uint8_t start = 0U;
+
+    while ((start < len) && (cmd_is_delimiter(line[start]) != 0U)) {
+        start++;
+    }
+    return cmd_match_word(line, len, start, "vision");
 }
 
 static uint8_t cmd_parse_pid(const uint8_t *line,
@@ -439,6 +468,16 @@ uint8_t ChassisSerialCmd_HandleLine(const uint8_t *line, uint8_t len)
         (cmd_starts_mode_word(line, len) != 0U);
 
     if (cmd_parse_mode(line, len, &mode) != 0U) {
+        Gimbal_SetVisionLaserRequest(cmd_is_vision_word(line, len));
+        if (mode == CHASSIS_MODE_TARGET_AIM) {
+            uint8_t static_target =
+                cmd_is_static_target_word(line, len);
+
+            Mode_SetTargetDriveEnabled((static_target != 0U) ? 0U : 1U);
+            if (static_target != 0U) {
+                Mode_SetTargetVisionReady(0U);
+            }
+        }
         Chassis_SetControlMode(mode);
         chassis_serial_cmd_ok_count++;
         chassis_serial_cmd_last_type = 1U;

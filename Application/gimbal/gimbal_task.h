@@ -40,6 +40,8 @@ extern volatile uint8_t chassis_fault_code;
 extern volatile uint8_t emergency_stop;
 extern volatile BalanceMotionState_e balance_motion_state;
 extern volatile uint8_t chassis_laser_safe;
+extern volatile uint8_t gimbal_laser_on;
+extern volatile uint8_t gimbal_vision_laser_request;
 extern volatile uint8_t balance_stop_brake_state;
 
 extern volatile float wheel_speed_ref_left_rpm;
@@ -92,11 +94,14 @@ extern volatile float chassis_serial_cmd_last_value;
 extern volatile uint8_t balance_zero_bias_frozen;
 extern volatile uint32_t gimbal_yaw_enable_queue_ok_count;
 extern volatile uint32_t gimbal_yaw_enable_queue_fail_count;
+extern volatile uint32_t gimbal_yaw_current_tx_ok_count;
+extern volatile uint32_t gimbal_yaw_current_tx_fail_count;
 
 extern void Gimbal_Task(void *argument);
 void WheelSpeed_SetTargetRpm(float rpm);
 void Balance_SetManualBiasDeg(float bias_deg);
 void Balance_SetPidRuntimeParam(BalancePidRuntimeParam_e param, float value);
 void Chassis_SetControlMode(ChassisMode_e mode);
+void Gimbal_SetVisionLaserRequest(uint8_t enabled);
 
 #endif /* GIMBAL_TASK_H */

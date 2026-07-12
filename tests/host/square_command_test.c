@@ -14,9 +14,17 @@ volatile float chassis_serial_cmd_last_value = 0.0f;
 static int failures = 0;
 static uint32_t mode_calls = 0U;
 static uint32_t wheel_calls = 0U;
+static uint32_t target_drive_calls = 0U;
+static uint8_t last_target_drive_enabled = 0U;
+static uint32_t target_ready_calls = 0U;
+static uint8_t last_target_ready = 0U;
+static uint32_t vision_laser_calls = 0U;
+static uint8_t last_vision_laser_enabled = 0U;
 static ChassisMode_e last_mode = CHASSIS_MODE_STAND;
 static float last_wheel_rpm = 0.0f;
 static Vision_Instance_t vision;
+
+static void expect_mode(const char *text, ChassisMode_e expected);
 
 #define CHECK(condition, message)                                      \
     do {                                                               \
@@ -36,6 +44,24 @@ void WheelSpeed_SetTargetRpm(float rpm)
 {
     wheel_calls++;
     last_wheel_rpm = rpm;
+}
+
+void Mode_SetTargetDriveEnabled(uint8_t enabled)
+{
+    target_drive_calls++;
+    last_target_drive_enabled = enabled;
+}
+
+void Mode_SetTargetVisionReady(uint8_t ready)
+{
+    target_ready_calls++;
+    last_target_ready = ready;
+}
+
+void Gimbal_SetVisionLaserRequest(uint8_t enabled)
+{
+    vision_laser_calls++;
+    last_vision_laser_enabled = enabled;
 }
 
 void Balance_SetManualBiasDeg(float bias_deg)
@@ -67,8 +93,29 @@ static void reset_calls(void)
 {
     mode_calls = 0U;
     wheel_calls = 0U;
+    target_drive_calls = 0U;
+    last_target_drive_enabled = 0U;
+    target_ready_calls = 0U;
+    last_target_ready = 0U;
+    vision_laser_calls = 0U;
+    last_vision_laser_enabled = 0U;
     last_mode = CHASSIS_MODE_STAND;
     last_wheel_rpm = 0.0f;
+}
+
+static void expect_target_mode(const char *text, uint8_t drive_enabled)
+{
+    expect_mode(text, CHASSIS_MODE_TARGET_AIM);
+    CHECK(target_drive_calls == 1U &&
+              last_target_drive_enabled == drive_enabled,
+          "target command must select the expected static/full task stage");
+    if (drive_enabled == 0U) {
+        CHECK(target_ready_calls == 1U && last_target_ready == 0U,
+              "static aim command must clear stale calibration readiness");
+    } else {
+        CHECK(target_ready_calls == 0U,
+              "full task command must not forge vision readiness");
+    }
 }
 
 static void expect_mode(const char *text, ChassisMode_e expected)
@@ -100,32 +147,51 @@ static void test_mode_compatibility(void)
     };
 
     CHECK(CHASSIS_MODE_STAND == 0 && CHASSIS_MODE_TRACKING == 5 &&
-              CHASSIS_MODE_SQUARE_TRACKING == 6,
-          "mode numeric ABI must remain 0..5 with square appended as 6");
+              CHASSIS_MODE_SQUARE_TRACKING == 6 &&
+              CHASSIS_MODE_TARGET_AIM == 7,
+          "mode numeric ABI must append square 6 and target aim 7");
 
     for (uint8_t i = 0U; i < 6U; i++) {
         char digit[2] = {(char)('0' + i), '\0'};
         expect_mode(digit, legacy_modes[i]);
     }
     expect_mode("track", CHASSIS_MODE_TRACKING);
+    expect_mode("vision", CHASSIS_MODE_STAND);
+    CHECK(vision_laser_calls == 1U && last_vision_laser_enabled == 1U,
+          "vision command must request laser-only calibration mode");
+    expect_mode("stand", CHASSIS_MODE_STAND);
+    CHECK(vision_laser_calls == 1U && last_vision_laser_enabled == 0U,
+          "stand command must clear the vision laser request");
     expect_mode("mode 5", CHASSIS_MODE_TRACKING);
     expect_mode("square", CHASSIS_MODE_SQUARE_TRACKING);
     expect_mode("box", CHASSIS_MODE_SQUARE_TRACKING);
     expect_mode("mode 6", CHASSIS_MODE_SQUARE_TRACKING);
     expect_mode("mode6", CHASSIS_MODE_SQUARE_TRACKING);
     expect_mode("m6", CHASSIS_MODE_SQUARE_TRACKING);
+    expect_target_mode("shoot", 1U);
+    expect_target_mode("aim", 0U);
+    expect_target_mode("target", 0U);
+    expect_target_mode("mode 7", 1U);
+    expect_target_mode("mode7", 1U);
+    expect_target_mode("m7", 1U);
 
     reset_calls();
     CHECK(route_line("6") == VISION_PARSE_NOT_VISION,
           "bare 6 must not be classified as vision");
     CHECK(mode_calls == 0U && wheel_calls == 1U && last_wheel_rpm == 6.0f,
           "bare 6 must retain the legacy wheel-speed meaning");
+
+    reset_calls();
+    CHECK(route_line("7") == VISION_PARSE_NOT_VISION,
+          "bare 7 must not be classified as vision");
+    CHECK(mode_calls == 0U && wheel_calls == 1U && last_wheel_rpm == 7.0f,
+          "bare 7 must retain the wheel-speed meaning");
 }
 
 static void test_invalid_explicit_modes(void)
 {
     static const char *const invalid[] = {
-        "mode 7", "m7", "m 7", "mode6x", "track6", "square6",
+        "mode 8", "m8", "m 8", "mode6x", "track6", "square6",
         "square,garbage", "mode 6,0,2", "5x", "6x", "6junk"
     };
 
@@ -139,7 +205,8 @@ static void test_invalid_explicit_modes(void)
 static void test_vision_frames_never_become_commands(void)
 {
     static const char *const invalid[] = {
-        "6,0,2", "6000,0,1", "6,", "5,0,2", "5000,0,1", "5,"
+        "7,0,2", "7000,0,1", "7,", "6,0,2", "6000,0,1",
+        "6,", "5,0,2", "5000,0,1", "5,"
     };
     int16_t dx = 0;
     int16_t dy = 0;

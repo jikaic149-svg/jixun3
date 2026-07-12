@@ -112,6 +112,29 @@ static void test_continuous_speed_deadband(void)
                -0.001f, "negative deadband exit must not jump");
 }
 
+static void test_quiet_retry_confirmation(void)
+{
+    float timer_sec = 0.0f;
+
+    CHECK(BalanceControl_QuietConfirmed(
+              1U, 0.10f, 0.30f, &timer_sec) == 0U,
+          "one quiet sample must not release a blocked start");
+    CHECK(BalanceControl_QuietConfirmed(
+              0U, 0.10f, 0.30f, &timer_sec) == 0U,
+          "motion must reset start retry confirmation");
+    check_near(timer_sec, 0.0f,
+               "retry quiet timer must reset on motion");
+    CHECK(BalanceControl_QuietConfirmed(
+              1U, 0.10f, 0.30f, &timer_sec) == 0U,
+          "retry must wait for the full quiet interval");
+    CHECK(BalanceControl_QuietConfirmed(
+              1U, 0.10f, 0.30f, &timer_sec) == 0U,
+          "retry must remain blocked before confirmation completes");
+    CHECK(BalanceControl_QuietConfirmed(
+              1U, 0.10f, 0.30f, &timer_sec) != 0U,
+          "continuous quiet HOLD must release a blocked start");
+}
+
 static void test_actual_base_blend_is_deterministic(void)
 {
     float blend = 0.0f;
@@ -381,6 +404,7 @@ int main(void)
     test_assist_transfer_is_continuous();
     test_bumpless_assist_handoff();
     test_continuous_speed_deadband();
+    test_quiet_retry_confirmation();
     test_actual_base_blend_is_deterministic();
     test_actual_base_low_pass();
     test_start_exit_confirmation();

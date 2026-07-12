@@ -1,5 +1,6 @@
 #include "gimbal_task.h"
 
+#include <math.h>
 #include <stddef.h>
 
 #include "FreeRTOS.h"
@@ -82,9 +83,18 @@ volatile uint8_t balance_zero_bias_frozen = 0U;
 volatile uint8_t emergency_stop = 1U;
 volatile BalanceMotionState_e balance_motion_state = BALANCE_MOTION_HOLD;
 volatile uint8_t chassis_laser_safe = 0U;
+volatile uint8_t gimbal_laser_on = 0U;
+volatile uint8_t gimbal_vision_laser_request = 0U;
 volatile uint8_t balance_stop_brake_state = 0U;
 volatile uint32_t gimbal_yaw_enable_queue_ok_count = 0U;
 volatile uint32_t gimbal_yaw_enable_queue_fail_count = 0U;
+volatile uint32_t gimbal_yaw_current_tx_ok_count = 0U;
+volatile uint32_t gimbal_yaw_current_tx_fail_count = 0U;
+
+static float gimbal_yaw_pending_current_a = 0.0f;
+static uint32_t gimbal_yaw_last_current_tx_tick = 0U;
+static uint8_t gimbal_yaw_current_active = 0U;
+static uint8_t gimbal_yaw_zero_retry_count = 0U;
 
 static ChassisMotorState_e last_chassis_motor_state = CHASSIS_MOTOR_ESTOP;
 static volatile uint8_t wheel_speed_target_changed = 0U;
@@ -133,6 +143,7 @@ static float balance_drive_actual_base_blend = 0.0f;
 static float balance_drive_actual_base_lpf_rpm = 0.0f;
 static float balance_start_assist_timer_sec = 0.0f;
 static float balance_start_exit_timer_sec = 0.0f;
+static float balance_start_retry_quiet_timer_sec = 0.0f;
 static float balance_motion_settle_timer_sec = 0.0f;
 static float balance_turn_ref_slew_rpm = 0.0f;
 static float balance_wheel_diff_lpf_rpm = 0.0f;
@@ -449,6 +460,7 @@ static void Chassis_UpdateKey(void)
         if (key_stable_state == 0U) {
             if (emergency_stop == 0U) {
                 Chassis_SetControlMode(CHASSIS_MODE_STAND);
+                Gimbal_SetVisionLaserRequest(0U);
                 chassis_speed_test_armed = 0U;
                 emergency_stop = 1U;
             } else if ((chassis_motor_feedback_ok != 0U) &&
@@ -614,6 +626,7 @@ static void Chassis_ResetBalancePid(void)
     balance_drive_actual_base_lpf_rpm = 0.0f;
     balance_start_assist_timer_sec = 0.0f;
     balance_start_exit_timer_sec = 0.0f;
+    balance_start_retry_quiet_timer_sec = 0.0f;
     balance_motion_settle_timer_sec = 0.0f;
     balance_turn_ref_slew_rpm = 0.0f;
     balance_wheel_diff_lpf_rpm = 0.0f;
@@ -670,6 +683,7 @@ static void Chassis_EnterMotionStarting(float drive_sign)
     balance_start_assist_deg = 0.0f;
     balance_start_assist_timer_sec = 0.0f;
     balance_start_exit_timer_sec = 0.0f;
+    balance_start_retry_quiet_timer_sec = 0.0f;
     balance_motion_settle_timer_sec = 0.0f;
     balance_speed_integral_m = 0.0f;
     balance_velocity_ref_ramp_mps = 0.0f;
@@ -1140,6 +1154,25 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
     drive_stop_edge = 0U;
     if (drive_requested == 0U) {
         balance_start_retry_blocked = 0U;
+        balance_start_retry_quiet_timer_sec = 0.0f;
+    } else if ((balance_motion_state == BALANCE_MOTION_HOLD) &&
+               (balance_start_retry_blocked != 0U)) {
+        uint8_t retry_quiet = Chassis_IsBalanceQuiet(
+            theta_deg,
+            balance_theta_ref_slew_deg,
+            theta_rate_dps,
+            left_rpm,
+            right_rpm);
+
+        if (BalanceControl_QuietConfirmed(
+                retry_quiet,
+                BALANCE_PID_DT_SEC,
+                BALANCE_MODE_START_RETRY_QUIET_SEC,
+                &balance_start_retry_quiet_timer_sec) != 0U) {
+            balance_start_retry_blocked = 0U;
+        }
+    } else {
+        balance_start_retry_quiet_timer_sec = 0.0f;
     }
 
     if (drive_requested != 0U) {
@@ -2029,23 +2062,107 @@ static void Gimbal_UpdateYawMotor(uint32_t now_tick)
 #if GIMBAL_YAW_MOTOR_CAN_ID_CONFIGURED
     static uint32_t enable_last_tick = 0U;
     static uint8_t enable_request_sent = 0U;
+    static uint32_t vision_last_frame_count = 0U;
+    static uint32_t vision_last_valid_tick = 0U;
+    static ChassisMode_e vision_last_mode = CHASSIS_MODE_COUNT;
+    static uint8_t vision_had_valid = 0U;
+    static uint8_t vision_tracking_valid = 0U;
+    int16_t vision_dx = 0;
+    int16_t vision_dy = 0;
+    uint8_t vision_valid = 0U;
+    uint32_t vision_frame_count =
+        INS_GetVisionTarget(&vision_dx, &vision_dy, &vision_valid);
     uint8_t feedback_ready =
         Motor_FeedbackReady(&gimbal_yaw_motor,
                             now_tick,
                             pdMS_TO_TICKS(GIMBAL_YAW_FEEDBACK_TIMEOUT_MS));
 
-    if ((feedback_ready != 0U) && (gimbal_yaw_motor.enabled != 0U)) {
-        enable_request_sent = 0U;
-    } else if ((enable_request_sent == 0U) ||
-               ((uint32_t)(now_tick - enable_last_tick) >=
-                pdMS_TO_TICKS(GIMBAL_YAW_ENABLE_RETRY_MS))) {
-        if (Motor_Enable(GIMBAL_YAW_MOTOR_ID) == HAL_OK) {
-            gimbal_yaw_enable_queue_ok_count++;
-            enable_last_tick = now_tick;
-            enable_request_sent = 1U;
-        } else {
-            gimbal_yaw_enable_queue_fail_count++;
+    if (vision_last_mode != chassis_mode) {
+        vision_last_mode = chassis_mode;
+        vision_last_frame_count = vision_frame_count;
+        vision_last_valid_tick = now_tick;
+        vision_had_valid = 0U;
+        vision_tracking_valid = 0U;
+        Mode_GimbalSetChassisSpeedFeedforward(0.0f, 0U);
+        Mode_GimbalResetIntegral();
+        /* A Mode 7 command alone must never energize yaw. The first fresh,
+         * valid visual frame below is the only transition into AIM. */
+        Mode_GimbalSet(GIMBAL_MODE_RELAX);
+    }
+
+    if (chassis_mode == CHASSIS_MODE_TARGET_AIM) {
+        if (vision_frame_count != vision_last_frame_count) {
+            float correction_deg = 0.0f;
+
+            vision_last_frame_count = vision_frame_count;
+            if ((vision_valid != 0U) &&
+                (feedback_ready != 0U) &&
+                (gimbal_yaw_motor.enabled != 0U) &&
+                (emergency_stop == 0U)) {
+                int16_t corrected_dx = vision_dx;
+
+                vision_last_valid_tick = now_tick;
+                vision_had_valid = 1U;
+                vision_tracking_valid = 1U;
+                Mode_SetTargetVisionReady(1U);
+                if ((corrected_dx >= -VISION_YAW_DEADBAND_PX) &&
+                    (corrected_dx <= VISION_YAW_DEADBAND_PX)) {
+                    corrected_dx = 0;
+                }
+                correction_deg =
+                    atanf((VISION_YAW_SIGN * (float)corrected_dx) /
+                          VISION_YAW_FOCAL_LENGTH_PX) *
+                    57.29577951308232f;
+                Mode_GimbalSet(GIMBAL_MODE_AIM);
+                Mode_GimbalSetTargetFromEncoderDeg(
+                    gimbal_yaw_motor.angle, correction_deg);
+            } else {
+                vision_tracking_valid = 0U;
+                Mode_SetTargetVisionReady(0U);
+                Mode_GimbalResetIntegral();
+            }
         }
+        if ((uint32_t)(now_tick - vision_last_valid_tick) >
+            pdMS_TO_TICKS(VISION_YAW_FRAME_TIMEOUT_MS)) {
+            vision_tracking_valid = 0U;
+            Mode_SetTargetVisionReady(0U);
+            Mode_GimbalResetIntegral();
+        }
+        if ((vision_had_valid != 0U) &&
+            ((uint32_t)(now_tick - vision_last_valid_tick) >
+             pdMS_TO_TICKS(VISION_YAW_CURRENT_STOP_TIMEOUT_MS))) {
+            Mode_GimbalSet(GIMBAL_MODE_RELAX);
+        }
+    }
+
+    Mode_GimbalSetChassisSpeedFeedforward(
+        balance_pid_velocity_mps,
+        ((chassis_mode == CHASSIS_MODE_TARGET_AIM) &&
+         (vision_tracking_valid != 0U) &&
+         (feedback_ready != 0U) &&
+         (gimbal_yaw_motor.enabled != 0U) &&
+         (emergency_stop == 0U) &&
+         ((balance_motion_state == BALANCE_MOTION_STARTING) ||
+          (balance_motion_state == BALANCE_MOTION_RUNNING))) ? 1U : 0U);
+
+    (void)vision_dy;
+
+    if (chassis_mode == CHASSIS_MODE_TARGET_AIM) {
+        if ((feedback_ready != 0U) && (gimbal_yaw_motor.enabled != 0U)) {
+            enable_request_sent = 0U;
+        } else if ((enable_request_sent == 0U) ||
+                   ((uint32_t)(now_tick - enable_last_tick) >=
+                    pdMS_TO_TICKS(GIMBAL_YAW_ENABLE_RETRY_MS))) {
+            if (Motor_Enable(GIMBAL_YAW_MOTOR_ID) == HAL_OK) {
+                gimbal_yaw_enable_queue_ok_count++;
+                enable_last_tick = now_tick;
+                enable_request_sent = 1U;
+            } else {
+                gimbal_yaw_enable_queue_fail_count++;
+            }
+        }
+    } else {
+        enable_request_sent = 0U;
     }
 
     uint8_t control_ready =
@@ -2059,15 +2176,77 @@ static void Gimbal_UpdateYawMotor(uint32_t now_tick)
                       GIMBAL_YAW_CONTROL_DT_SEC);
 #if GIMBAL_YAW_CURRENT_COMMAND_ENABLE
     GimbalCommand_t command;
+    uint8_t current_active;
 
     Mode_GimbalGetCommand(&command);
-    Motor_SetCurrent(GIMBAL_YAW_MOTOR_ID,
-                     (command.drive_enabled != 0U) ?
-                     command.yaw_current_a : 0.0f);
+    current_active =
+        ((chassis_mode == CHASSIS_MODE_TARGET_AIM) &&
+         (control_ready != 0U) &&
+         (command.drive_enabled != 0U)) ? 1U : 0U;
+    gimbal_yaw_pending_current_a =
+        (current_active != 0U) ? command.yaw_current_a : 0.0f;
+    if ((gimbal_yaw_current_active != 0U) &&
+        (current_active == 0U)) {
+        gimbal_yaw_zero_retry_count = GIMBAL_YAW_ZERO_RETRY_COUNT;
+        if (Motor_TrySetCurrent(GIMBAL_YAW_MOTOR_ID, 0.0f) == HAL_OK) {
+            gimbal_yaw_current_tx_ok_count++;
+            gimbal_yaw_last_current_tx_tick = now_tick;
+            if (gimbal_yaw_zero_retry_count > 0U) {
+                gimbal_yaw_zero_retry_count--;
+            }
+        } else {
+            gimbal_yaw_current_tx_fail_count++;
+        }
+    } else if (current_active != 0U) {
+        gimbal_yaw_zero_retry_count = 0U;
+    }
+    gimbal_yaw_current_active = current_active;
 #endif
 #else
     (void)now_tick;
     Mode_GimbalUpdate(0.0f, 0.0f, 0U, GIMBAL_YAW_CONTROL_DT_SEC);
+#endif
+}
+
+void Gimbal_SetVisionLaserRequest(uint8_t enabled)
+{
+    gimbal_vision_laser_request = (enabled != 0U) ? 1U : 0U;
+}
+
+static void Gimbal_FlushYawCurrent(uint32_t now_tick)
+{
+#if GIMBAL_YAW_MOTOR_CAN_ID_CONFIGURED && GIMBAL_YAW_CURRENT_COMMAND_ENABLE
+    uint32_t period_tick;
+    float current_a;
+
+    if (gimbal_yaw_zero_retry_count != 0U) {
+        period_tick = pdMS_TO_TICKS(1U);
+        current_a = 0.0f;
+    } else if (gimbal_yaw_current_active != 0U) {
+        period_tick = pdMS_TO_TICKS(GIMBAL_YAW_COMMAND_PERIOD_MS);
+        current_a = gimbal_yaw_pending_current_a;
+    } else {
+        return;
+    }
+    if (period_tick == 0U) {
+        period_tick = 1U;
+    }
+    if ((uint32_t)(now_tick - gimbal_yaw_last_current_tx_tick) <
+        period_tick) {
+        return;
+    }
+
+    if (Motor_TrySetCurrent(GIMBAL_YAW_MOTOR_ID, current_a) == HAL_OK) {
+        gimbal_yaw_current_tx_ok_count++;
+        gimbal_yaw_last_current_tx_tick = now_tick;
+        if (gimbal_yaw_zero_retry_count != 0U) {
+            gimbal_yaw_zero_retry_count--;
+        }
+    } else {
+        gimbal_yaw_current_tx_fail_count++;
+    }
+#else
+    (void)now_tick;
 #endif
 }
 
@@ -2126,16 +2305,34 @@ static uint8_t Chassis_IsLaserMotionSafe(void)
 static void Gimbal_UpdateLaser(uint8_t motion_safe)
 {
     ModeCommand_t command;
+    uint8_t target_task_safe;
+    uint8_t vision_laser_safe;
 
     Mode_GetCommand(&command);
-    if ((motion_safe != 0U) &&
+    target_task_safe =
+        ((chassis_mode == CHASSIS_MODE_TARGET_AIM) &&
+         (command.laser_enabled != 0U) &&
+         (chassis_motor_state == CHASSIS_MOTOR_BALANCE_PID) &&
+         (chassis_motor_feedback_ok != 0U) &&
+         (chassis_motor_enabled_ok != 0U) &&
+         (emergency_stop == 0U) &&
+         (chassis_fault_code == CHASSIS_FAULT_NONE)) ? 1U : 0U;
+    vision_laser_safe =
+        ((gimbal_vision_laser_request != 0U) &&
+         (chassis_mode == CHASSIS_MODE_STAND)) ? 1U : 0U;
+
+    if ((vision_laser_safe != 0U) ||
+        (target_task_safe != 0U) ||
+        ((motion_safe != 0U) &&
         (command.laser_enabled != 0U) &&
         (chassis_mode == CHASSIS_MODE_TRACKING) &&
         (Mode_TrackingGetPhase() ==
-         MODE_TRACKING_PHASE_TARGET_LASER_DWELL)) {
+         MODE_TRACKING_PHASE_TARGET_LASER_DWELL))) {
         BSP_LaserOn();
+        gimbal_laser_on = 1U;
     } else {
         BSP_LaserOff();
+        gimbal_laser_on = 0U;
     }
 }
 
@@ -2149,6 +2346,13 @@ void Gimbal_Task(void *argument)
     Mode_Init();
     Mode_GimbalInit();
     BSP_LaserOff();
+#if GIMBAL_YAW_MOTOR_CAN_ID_CONFIGURED && GIMBAL_YAW_CURRENT_COMMAND_ENABLE
+    /* A warm MCU reset does not reset the motor driver. Explicitly overwrite
+     * any current command left latched in the driver before normal control. */
+    gimbal_yaw_pending_current_a = 0.0f;
+    gimbal_yaw_current_active = 0U;
+    gimbal_yaw_zero_retry_count = GIMBAL_YAW_ZERO_RETRY_COUNT;
+#endif
 #if GIMBAL_YAW_MOTOR_CAN_ID_CONFIGURED && GIMBAL_YAW_AUTO_HOLD_ENABLE
     Mode_GimbalSet(GIMBAL_MODE_HOLD);
 #endif
@@ -2238,6 +2442,7 @@ void Gimbal_Task(void *argument)
         Gimbal_UpdateYawMotor(now_tick);
         Motor_SetCurrent(LEFT_WHEEL_MOTOR_ID, left_current);
         Motor_SetCurrent(RIGHT_WHEEL_MOTOR_ID, right_current);
+        Gimbal_FlushYawCurrent(now_tick);
 
         Chassis_UpdateLed();
 

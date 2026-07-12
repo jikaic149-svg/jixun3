@@ -655,6 +655,11 @@
               <FilePath>../mode/mode_square_tracking.c</FilePath>
             </File>
             <File>
+              <FileName>mode_target_aim.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../mode/mode_target_aim.c</FilePath>
+            </File>
+            <File>
               <FileName>mode_gimbal.c</FileName>
               <FileType>1</FileType>
               <FilePath>../mode/mode_gimbal.c</FilePath>

@@ -273,6 +273,133 @@ ModeTrackingPhase_e Mode_TrackingGetPhase(void)
     return tracking_phase;
 }
 
+static void tracking_build_valid_line(ModeCommand_t *command,
+                                      float error,
+                                      uint8_t sensor_new_frame,
+                                      float frame_dt_sec)
+{
+    float derivative;
+    float abs_error;
+    float speed_scale = 1.0f;
+    float turn_rpm;
+
+    if (sensor_new_frame == 0U) {
+        tracking_build_motion(command,
+                              tracking_last_velocity_mps,
+                              tracking_last_bias_deg,
+                              tracking_last_turn_rpm);
+        return;
+    }
+
+    tracking_lost_elapsed_sec = 0.0f;
+    tracking_line_seen = 1U;
+    tracking_lost_active = 0U;
+    tracking_lost_search_dir = 0.0f;
+
+    if (tracking_ready == 0U) {
+        tracking_filtered_error = error;
+        tracking_last_error = error;
+        tracking_integral = 0.0f;
+        tracking_last_turn_rpm = 0.0f;
+        tracking_ready = 1U;
+    } else {
+        tracking_filtered_error =
+            TRACKING_ERROR_LPF_ALPHA * tracking_filtered_error +
+            (1.0f - TRACKING_ERROR_LPF_ALPHA) * error;
+    }
+
+    abs_error = mode_absf(tracking_filtered_error);
+    if (abs_error <= TRACKING_INTEGRAL_ZONE_ERROR) {
+        tracking_integral += tracking_filtered_error * frame_dt_sec;
+        tracking_integral =
+            mode_limit_abs(tracking_integral,
+                           TRACKING_INTEGRAL_LIMIT_ERROR_S);
+    } else {
+        tracking_integral *= TRACKING_INTEGRAL_DECAY;
+    }
+
+    derivative = (tracking_filtered_error - tracking_last_error) /
+                 frame_dt_sec;
+    tracking_last_error = tracking_filtered_error;
+
+    turn_rpm =
+        TRACKING_TURN_KP_RPM_PER_ERROR * tracking_filtered_error +
+        TRACKING_TURN_KI_RPM_PER_ERROR_S * tracking_integral +
+        TRACKING_TURN_KD_RPM_PER_ERROR_RATE * derivative;
+    turn_rpm = mode_limit_abs(turn_rpm, TRACKING_TURN_LIMIT_RPM);
+    tracking_last_turn_rpm = turn_rpm;
+    if (mode_absf(turn_rpm) >= TRACKING_TURN_MEMORY_MIN_RPM) {
+        tracking_last_turn_dir = (turn_rpm >= 0.0f) ? 1.0f : -1.0f;
+    }
+
+    if ((abs_error >= TRACKING_SHARP_TURN_ENTER_ERROR) ||
+        (mode_absf(turn_rpm) >= TRACKING_SHARP_TURN_GATE_RPM)) {
+        tracking_sharp_turn_active = 1U;
+    } else if (abs_error <= TRACKING_SHARP_TURN_EXIT_ERROR) {
+        tracking_sharp_turn_active = 0U;
+    }
+
+    if (abs_error > TRACKING_CURVE_SLOWDOWN_ERROR) {
+        float span = TRACKING_LOST_ERROR - TRACKING_CURVE_SLOWDOWN_ERROR;
+        float norm = (span > 0.001f) ?
+                     ((abs_error - TRACKING_CURVE_SLOWDOWN_ERROR) / span) :
+                     1.0f;
+        if (norm > 1.0f) {
+            norm = 1.0f;
+        }
+        speed_scale =
+            1.0f - norm * norm * (1.0f - TRACKING_MIN_SPEED_RATIO);
+        if (speed_scale < TRACKING_MIN_SPEED_RATIO) {
+            speed_scale = TRACKING_MIN_SPEED_RATIO;
+        }
+    }
+
+    tracking_last_velocity_mps = TRACKING_BASE_VELOCITY_MPS * speed_scale;
+    if ((tracking_sharp_turn_active != 0U) &&
+        (tracking_last_velocity_mps > TRACKING_SHARP_TURN_VELOCITY_MPS)) {
+        tracking_last_velocity_mps = TRACKING_SHARP_TURN_VELOCITY_MPS;
+    }
+    tracking_build_motion(command,
+                          tracking_last_velocity_mps,
+                          TRACKING_FORWARD_BIAS_DEG,
+                          turn_rpm);
+    tracking_last_bias_deg = TRACKING_FORWARD_BIAS_DEG;
+}
+
+void Mode_TrackingBuildLineFollow(ModeCommand_t *command,
+                                  float error,
+                                  uint8_t sensor_flags,
+                                  float dt_sec)
+{
+    float frame_dt_sec;
+    uint8_t sensor_new_frame;
+
+    tracking_build_hold(command, 0U);
+    if ((sensor_flags & MODE_TRACKING_SENSOR_FRESH) == 0U ||
+        error == TRACK_LOST_LINE) {
+        return;
+    }
+    if (dt_sec <= 0.0f) {
+        dt_sec = BALANCE_PID_DT_SEC;
+    }
+    frame_dt_sec = dt_sec;
+    sensor_new_frame =
+        ((sensor_flags & MODE_TRACKING_SENSOR_NEW_FRAME) != 0U) ? 1U : 0U;
+    tracking_sensor_clock_sec += dt_sec;
+    if (sensor_new_frame != 0U) {
+        if (tracking_last_frame_clock_sec > 0.0f) {
+            frame_dt_sec = tracking_sensor_clock_sec -
+                           tracking_last_frame_clock_sec;
+            if ((frame_dt_sec <= 0.0f) || (frame_dt_sec > 0.1f)) {
+                frame_dt_sec = dt_sec;
+            }
+        }
+        tracking_last_frame_clock_sec = tracking_sensor_clock_sec;
+    }
+    tracking_build_valid_line(command, error, sensor_new_frame,
+                              frame_dt_sec);
+}
+
 void Mode_TrackingBuild(ModeCommand_t *command,
                         float error,
                         uint8_t black_count,
@@ -281,11 +408,7 @@ void Mode_TrackingBuild(ModeCommand_t *command,
                         float actual_velocity_mps,
                         float dt_sec)
 {
-    float derivative;
     float frame_dt_sec;
-    float abs_error;
-    float speed_scale = 1.0f;
-    float turn_rpm;
     uint8_t wide_block;
     uint8_t target_block;
     uint8_t sensor_fresh;
@@ -490,14 +613,6 @@ void Mode_TrackingBuild(ModeCommand_t *command,
         return;
     }
 
-    if ((error != TRACK_LOST_LINE) && (sensor_new_frame == 0U)) {
-        tracking_build_motion(command,
-                              tracking_last_velocity_mps,
-                              tracking_last_bias_deg,
-                              tracking_last_turn_rpm);
-        return;
-    }
-
     if (error == TRACK_LOST_LINE) {
         float lost_hold_sec = 0.001f * (float)TRACKING_LOST_HOLD_MS;
         float lost_refind_sec =
@@ -539,77 +654,6 @@ void Mode_TrackingBuild(ModeCommand_t *command,
         return;
     }
 
-    tracking_lost_elapsed_sec = 0.0f;
-    tracking_line_seen = 1U;
-    tracking_lost_active = 0U;
-    tracking_lost_search_dir = 0.0f;
-
-    if (tracking_ready == 0U) {
-        tracking_filtered_error = error;
-        tracking_last_error = error;
-        tracking_integral = 0.0f;
-        tracking_last_turn_rpm = 0.0f;
-        tracking_ready = 1U;
-    } else {
-        tracking_filtered_error =
-            TRACKING_ERROR_LPF_ALPHA * tracking_filtered_error +
-            (1.0f - TRACKING_ERROR_LPF_ALPHA) * error;
-    }
-
-    abs_error = mode_absf(tracking_filtered_error);
-    if (abs_error <= TRACKING_INTEGRAL_ZONE_ERROR) {
-        tracking_integral += tracking_filtered_error * frame_dt_sec;
-        tracking_integral =
-            mode_limit_abs(tracking_integral,
-                           TRACKING_INTEGRAL_LIMIT_ERROR_S);
-    } else {
-        tracking_integral *= TRACKING_INTEGRAL_DECAY;
-    }
-
-    derivative = (tracking_filtered_error - tracking_last_error) /
-                 frame_dt_sec;
-    tracking_last_error = tracking_filtered_error;
-
-    turn_rpm =
-        TRACKING_TURN_KP_RPM_PER_ERROR * tracking_filtered_error +
-        TRACKING_TURN_KI_RPM_PER_ERROR_S * tracking_integral +
-        TRACKING_TURN_KD_RPM_PER_ERROR_RATE * derivative;
-    turn_rpm = mode_limit_abs(turn_rpm, TRACKING_TURN_LIMIT_RPM);
-    tracking_last_turn_rpm = turn_rpm;
-    if (mode_absf(turn_rpm) >= TRACKING_TURN_MEMORY_MIN_RPM) {
-        tracking_last_turn_dir = (turn_rpm >= 0.0f) ? 1.0f : -1.0f;
-    }
-
-    if ((abs_error >= TRACKING_SHARP_TURN_ENTER_ERROR) ||
-        (mode_absf(turn_rpm) >= TRACKING_SHARP_TURN_GATE_RPM)) {
-        tracking_sharp_turn_active = 1U;
-    } else if (abs_error <= TRACKING_SHARP_TURN_EXIT_ERROR) {
-        tracking_sharp_turn_active = 0U;
-    }
-
-    if (abs_error > TRACKING_CURVE_SLOWDOWN_ERROR) {
-        float span = TRACKING_LOST_ERROR - TRACKING_CURVE_SLOWDOWN_ERROR;
-        float norm = (span > 0.001f) ?
-                     ((abs_error - TRACKING_CURVE_SLOWDOWN_ERROR) / span) :
-                     1.0f;
-        if (norm > 1.0f) {
-            norm = 1.0f;
-        }
-        speed_scale =
-            1.0f - norm * norm * (1.0f - TRACKING_MIN_SPEED_RATIO);
-        if (speed_scale < TRACKING_MIN_SPEED_RATIO) {
-            speed_scale = TRACKING_MIN_SPEED_RATIO;
-        }
-    }
-
-    tracking_last_velocity_mps = TRACKING_BASE_VELOCITY_MPS * speed_scale;
-    if ((tracking_sharp_turn_active != 0U) &&
-        (tracking_last_velocity_mps > TRACKING_SHARP_TURN_VELOCITY_MPS)) {
-        tracking_last_velocity_mps = TRACKING_SHARP_TURN_VELOCITY_MPS;
-    }
-    tracking_build_motion(command,
-                          tracking_last_velocity_mps,
-                          TRACKING_FORWARD_BIAS_DEG,
-                          turn_rpm);
-    tracking_last_bias_deg = TRACKING_FORWARD_BIAS_DEG;
+    tracking_build_valid_line(command, error, sensor_new_frame,
+                              frame_dt_sec);
 }
