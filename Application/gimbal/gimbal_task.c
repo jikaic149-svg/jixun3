@@ -1021,7 +1021,7 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
     uint8_t drive_pulse_brake_active;
     uint8_t drive_pulse_hold_active;
     uint8_t stop_brake_active;
-    uint8_t stop_neutral_hold_active;
+    uint8_t longitudinal_neutral_active;
     uint8_t drive_stop_edge;
     uint8_t speed_integral_safety_decay;
     uint8_t speed_integration_eligible;
@@ -1437,6 +1437,8 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
                     (measured_velocity_mps >= 0.0f) ? 1.0f : -1.0f;
                 balance_stop_brake_timer_sec =
                     BALANCE_MODE_STOP_BRAKE_TIME_SEC;
+            } else {
+                balance_stop_brake_lockout = 1U;
             }
         }
 
@@ -1497,12 +1499,15 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
         ((balance_stop_brake_dir > 0.0f) ? 0x02U : 0U) |
         ((balance_stop_brake_dir < 0.0f) ? 0x04U : 0U) |
         ((balance_stop_brake_lockout != 0U) ? 0x08U : 0U);
-    /* After the first zero crossing, keep only upright control until the
-     * wheels remain quiet; the stand outer loop must not pull back to stop. */
-    stop_neutral_hold_active =
+    /* Braking and in-place turns keep only upright plus differential turn
+     * control. A longitudinal stand correction here moves both wheels in the
+     * same direction and was the measured source of rollback. */
+    longitudinal_neutral_active =
         ((drive_requested == 0U) &&
          (stop_brake_active == 0U) &&
-         (balance_stop_brake_lockout != 0U)) ? 1U : 0U;
+         ((balance_motion_state == BALANCE_MOTION_BRAKING) ||
+          (balance_stop_brake_lockout != 0U) ||
+          (Chassis_AbsF(mode_command.turn_rpm) > 0.001f))) ? 1U : 0U;
     balance_velocity_ref_ramp_mps =
         Chassis_StepTowards(balance_velocity_ref_ramp_mps,
                             target_velocity_mps,
@@ -1580,7 +1585,7 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
         ((balance_motion_state == BALANCE_MOTION_STARTING) ||
          (balance_motion_state == BALANCE_MOTION_RUNNING)) ? 1U : 0U;
 
-    if ((drive_bias_mode != 0U) || (stop_neutral_hold_active != 0U)) {
+    if ((drive_bias_mode != 0U) || (longitudinal_neutral_active != 0U)) {
         balance_position_ref_m = measured_position_m;
     }
 
@@ -1588,7 +1593,7 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
     speed_error_mps = BalanceControl_ApplyContinuousDeadband(
         speed_error_mps, BALANCE_PID_WHEEL_SPEED_DEADBAND_MPS);
     position_error_m = balance_position_ref_m - measured_position_m;
-    if ((drive_bias_mode != 0U) || (stop_neutral_hold_active != 0U)) {
+    if ((drive_bias_mode != 0U) || (longitudinal_neutral_active != 0U)) {
         position_error_m = 0.0f;
     }
     accel_error_mps2 = 0.0f - balance_accel_lpf_mps2;
@@ -1699,7 +1704,7 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
             speed_theta_ref_deg,
             BALANCE_POSITION_THETA_REF_LIMIT_DEG);
     }
-    if (stop_neutral_hold_active != 0U) {
+    if (longitudinal_neutral_active != 0U) {
         speed_theta_ref_deg = 0.0f;
     }
 #if !BALANCE_MODE_DRIVE_THETA_REF_ENABLE
