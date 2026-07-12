@@ -16,12 +16,26 @@ static uint8_t cmd_is_delimiter(uint8_t c)
            (c == '=') || (c == ',');
 }
 
+static uint8_t cmd_only_delimiters(const uint8_t *line,
+                                   uint8_t len,
+                                   uint8_t start)
+{
+    while (start < len) {
+        if (cmd_is_delimiter(line[start]) == 0U) {
+            return 0U;
+        }
+        start++;
+    }
+    return 1U;
+}
+
 static uint8_t cmd_match_word(const uint8_t *line,
                               uint8_t len,
                               uint8_t start,
                               const char *word)
 {
     uint8_t i = 0U;
+    uint8_t end;
 
     if ((line == 0) || (word == 0)) {
         return 0U;
@@ -37,8 +51,8 @@ static uint8_t cmd_match_word(const uint8_t *line,
         i++;
     }
 
-    if (((uint8_t)(start + i) < len) &&
-        (cmd_is_delimiter(line[start + i]) == 0U)) {
+    end = (uint8_t)(start + i);
+    if (cmd_only_delimiters(line, len, end) == 0U) {
         return 0U;
     }
 
@@ -95,7 +109,8 @@ static uint8_t cmd_parse_float(const uint8_t *line, uint8_t len, float *value_ou
         i++;
     }
 
-    if (has_digit == 0U) {
+    if ((has_digit == 0U) ||
+        (cmd_only_delimiters(line, len, i) == 0U)) {
         return 0U;
     }
 
@@ -138,7 +153,7 @@ static uint8_t cmd_parse_bias(const uint8_t *line, uint8_t len, float *bias_deg)
 
 static uint8_t cmd_mode_from_digit(uint8_t c, ChassisMode_e *mode)
 {
-    if ((mode == 0) || (c < '0') || (c > '5')) {
+    if ((mode == 0) || (c < '0') || (c > '6')) {
         return 0U;
     }
 
@@ -190,6 +205,11 @@ static uint8_t cmd_mode_from_word(const uint8_t *line,
         *mode = CHASSIS_MODE_TRACKING;
         return 1U;
     }
+    if ((cmd_match_word(line, len, start, "square") != 0U) ||
+        (cmd_match_word(line, len, start, "box") != 0U)) {
+        *mode = CHASSIS_MODE_SQUARE_TRACKING;
+        return 1U;
+    }
 
     return 0U;
 }
@@ -215,9 +235,11 @@ static uint8_t cmd_parse_mode(const uint8_t *line,
         return 1U;
     }
 
-    if ((cmd_mode_from_digit(line[i], mode) != 0U) &&
-        (((uint8_t)(i + 1U) >= len) ||
-         (cmd_is_delimiter(line[i + 1U]) != 0U))) {
+    /* Bare 6 remains the legacy 6 RPM wheel-speed command. Square mode is
+     * selected explicitly with square, mode 6, or m6. */
+    if ((line[i] <= '5') &&
+        (cmd_mode_from_digit(line[i], mode) != 0U) &&
+        (cmd_only_delimiters(line, len, (uint8_t)(i + 1U)) != 0U)) {
         return 1U;
     }
 
@@ -240,10 +262,85 @@ static uint8_t cmd_parse_mode(const uint8_t *line,
         return 0U;
     }
 
-    if (cmd_mode_from_digit(line[i], mode) != 0U) {
+    if ((cmd_mode_from_digit(line[i], mode) != 0U) &&
+        (cmd_only_delimiters(line, len, (uint8_t)(i + 1U)) != 0U)) {
         return 1U;
     }
     return cmd_mode_from_word(line, len, i, mode);
+}
+
+static uint8_t cmd_has_explicit_mode_prefix(const uint8_t *line, uint8_t len)
+{
+    uint8_t i = 0U;
+
+    if ((line == 0) || (len == 0U)) {
+        return 0U;
+    }
+    while ((i < len) && (cmd_is_delimiter(line[i]) != 0U)) {
+        i++;
+    }
+    if ((i >= len) || (cmd_to_lower(line[i]) != 'm')) {
+        return 0U;
+    }
+    if ((uint8_t)(i + 1U) >= len) {
+        return 1U;
+    }
+    if ((line[i + 1U] >= '0') && (line[i + 1U] <= '9')) {
+        return 1U;
+    }
+    if (cmd_is_delimiter(line[i + 1U]) != 0U) {
+        return 1U;
+    }
+    return (((uint8_t)(i + 4U) <= len) &&
+            (cmd_to_lower(line[i + 1U]) == 'o') &&
+            (cmd_to_lower(line[i + 2U]) == 'd') &&
+            (cmd_to_lower(line[i + 3U]) == 'e')) ? 1U : 0U;
+}
+
+static uint8_t cmd_starts_text(const uint8_t *line,
+                               uint8_t len,
+                               uint8_t start,
+                               const char *text)
+{
+    uint8_t i = 0U;
+
+    while (text[i] != '\0') {
+        if (((uint8_t)(start + i) >= len) ||
+            (cmd_to_lower(line[start + i]) != (uint8_t)text[i])) {
+            return 0U;
+        }
+        i++;
+    }
+    return 1U;
+}
+
+static uint8_t cmd_starts_mode_word(const uint8_t *line, uint8_t len)
+{
+    static const char *const words[] = {
+        "stand", "balance", "forward", "go", "backward", "back",
+        "reverse", "stop", "park", "left", "right", "track",
+        "tracking", "line", "square", "box"
+    };
+    uint8_t start = 0U;
+
+    if ((line == 0) || (len == 0U)) {
+        return 0U;
+    }
+    while ((start < len) && (cmd_is_delimiter(line[start]) != 0U)) {
+        start++;
+    }
+    if (start >= len) {
+        return 0U;
+    }
+
+    for (uint8_t i = 0U;
+         i < (uint8_t)(sizeof(words) / sizeof(words[0]));
+         i++) {
+        if (cmd_starts_text(line, len, start, words[i]) != 0U) {
+            return 1U;
+        }
+    }
+    return 0U;
 }
 
 static uint8_t cmd_parse_pid(const uint8_t *line,
@@ -334,8 +431,12 @@ uint8_t ChassisSerialCmd_HandleLine(const uint8_t *line, uint8_t len)
     float value;
     ChassisMode_e mode;
     BalancePidRuntimeParam_e pid_param;
+    uint8_t explicit_mode_command;
 
     chassis_serial_cmd_rx_count++;
+    explicit_mode_command =
+        (cmd_has_explicit_mode_prefix(line, len) != 0U) ||
+        (cmd_starts_mode_word(line, len) != 0U);
 
     if (cmd_parse_mode(line, len, &mode) != 0U) {
         Chassis_SetControlMode(mode);
@@ -343,6 +444,9 @@ uint8_t ChassisSerialCmd_HandleLine(const uint8_t *line, uint8_t len)
         chassis_serial_cmd_last_type = 1U;
         chassis_serial_cmd_last_value = (float)mode;
         return 1U;
+    }
+    if (explicit_mode_command != 0U) {
+        return 0U;
     }
     if (cmd_parse_bias(line, len, &value) != 0U) {
         Balance_SetManualBiasDeg(value);

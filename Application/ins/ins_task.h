@@ -68,5 +68,6 @@ void INS_RequestYawCalibration(void);
 uint8_t INS_GetYawCalibrationState(void);
 float INS_GetYawBiasDps(void);
 void INS_RequestBalanceAngleReseed(void);
+uint32_t INS_GetVisionTarget(int16_t *dx, int16_t *dy, uint8_t *valid);
 
 #endif /* INS_TASK_H */

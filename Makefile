@@ -74,6 +74,7 @@ mode/mode_backward.c \
 mode/mode_turn_left.c \
 mode/mode_turn_right.c \
 mode/mode_tracking.c \
+mode/mode_square_tracking.c \
 mode/mode_gimbal.c \
 Application/algorithm/attitude_algorithm.c \
 Application/algorithm/crc16.c \
@@ -81,6 +82,7 @@ Application/algorithm/adrc_eso.c \
 Application/algorithm/lqr_controller.c \
 Application/algorithm/balance_outer_loop.c \
 Application/algorithm/balance_zero_bias_search.c \
+Application/algorithm/balance_control_helpers.c \
 Application/ins/ins_task.c \
 Application/gimbal/chassis_serial_cmd.c \
 Application/gimbal/gimbal_task.c \

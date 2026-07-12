@@ -4,6 +4,5 @@
 
 void Mode_StopBuild(ModeCommand_t *command)
 {
-    Mode_CommandClear(command);
-    command->bias_deg = BALANCE_MODE_STAND_BIAS_DEG;
+    Mode_MotionBuild(command, 0.0f, BALANCE_MODE_STAND_BIAS_DEG, 0.0f);
 }

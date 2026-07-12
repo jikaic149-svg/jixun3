@@ -19,6 +19,7 @@
 #include "bmi088_reg.h"
 #include "vofa.h"
 #include "track.h"
+#include "vision.h"
 
 /* Algorithm 层 */
 #include "attitude_algorithm.h"
@@ -91,6 +92,7 @@ static KalmanAngle_t        g_balance_kalman;
 static KalmanScalar_t       g_yaw_rate_kalman;
 static Vofa_Instance_t      g_vofa;
 static Track_Instance       g_track;
+static Vision_Instance_t    g_vision;
 
 /* INS 任务句柄 (用于 TaskNotify) */
 static TaskHandle_t ins_task_handle_local = NULL;
@@ -120,6 +122,7 @@ static uint8_t vofa_cmd_pop(uint8_t *line, uint8_t *len);
 #define VOFA_CMD_QUEUE_LEN  16U
 
 static volatile uint8_t vofa_cmd_rx_len = 0U;
+static volatile uint8_t vofa_cmd_rx_discard = 0U;
 static uint8_t vofa_cmd_rx_buf[VOFA_CMD_BUF_LEN];
 static volatile uint8_t vofa_cmd_head = 0U;
 static volatile uint8_t vofa_cmd_tail = 0U;
@@ -151,6 +154,7 @@ void INS_Init(void)
     BSP_UART6_RegisterRxCallback(vofa_rx_byte_callback);
 
     Vofa_Init(&g_vofa, vofa_send_adapter);
+    Vision_Init(&g_vision);
 #if TRACKING_UART_ENABLE
     BSP_UART1_Init();
     Track_Init(&g_track, track_send_adapter);
@@ -565,30 +569,38 @@ void INS_Task(void *argument)
                 vofa_header_sent = 1U;
             }
 #elif VOFA_DEBUG_STAGE == VOFA_DEBUG_STAGE_TRACK_ADC
-            float vofa_track_error = Track_GetError(&g_track);
+            Track_Snapshot_t vofa_track_snapshot;
             ModeCommand_t vofa_mode_command;
+            float vofa_track_error = TRACK_LOST_LINE;
+            float vofa_track_black_mask = 0.0f;
+
+            if (Track_GetSnapshot(&g_track, &vofa_track_snapshot) != 0U) {
+                vofa_track_error = vofa_track_snapshot.error;
+                vofa_track_black_mask =
+                    (float)vofa_track_snapshot.black_mask;
+            }
             Mode_GetCommand(&vofa_mode_command);
             float vofa_channels[VOFA_OUTPUT_CHANNEL_COUNT] = {
-                (float)Track_GetADC(&g_track, 0U),
-                (float)Track_GetADC(&g_track, 1U),
-                (float)Track_GetADC(&g_track, 2U),
-                (float)Track_GetADC(&g_track, 3U),
-                (float)Track_GetADC(&g_track, 4U),
-                (float)Track_GetADC(&g_track, 5U),
-                (float)Track_GetADC(&g_track, 6U),
-                (float)Track_GetADC(&g_track, 7U),
                 vofa_track_error,
-                (vofa_track_error == TRACK_LOST_LINE) ? 1.0f : 0.0f,
                 (float)chassis_mode,
+                (float)balance_motion_state,
                 vofa_mode_command.velocity_mps,
-                vofa_mode_command.turn_rpm,
-                balance_pid_velocity_mps,
                 balance_pid_velocity_ref_mps,
-                balance_pid_velocity_ref_mps - balance_pid_velocity_mps
+                balance_pid_velocity_mps,
+                wheel_speed_ref_left_rpm,
+                wheel_speed_actual_left_rpm,
+                wheel_speed_ref_right_rpm,
+                wheel_speed_actual_right_rpm,
+                balance_pid_theta_ref_deg,
+                balance_pid_theta_deg,
+                vofa_track_black_mask,
+                (float)Mode_SquareTrackingGetPhase(),
+                (float)Mode_SquareTrackingGetCornerCount(),
+                (float)balance_stop_brake_state
             };
             if (vofa_header_sent == 0U) {
                 (void)Vofa_SendText(&g_vofa,
-                                    "track_x1_adc,track_x2_adc,track_x3_adc,track_x4_adc,track_x5_adc,track_x6_adc,track_x7_adc,track_x8_adc,track_error,lost,chassis_mode,cmd_velocity_mps,turn_rpm,actual_velocity_mps,ref_velocity_mps,velocity_err_mps\r\n");
+                                    "track_error,chassis_mode,motion_state,cmd_velocity_mps,target_velocity_mps,actual_velocity_mps,left_target_rpm,left_actual_rpm,right_target_rpm,right_actual_rpm,target_theta_deg,actual_theta_deg,black_mask,square_phase,square_corner_count,stop_brake_state\r\n");
                 vofa_header_sent = 1U;
             }
 #elif VOFA_DEBUG_STAGE == VOFA_DEBUG_STAGE_YAW_CAN
@@ -709,6 +721,10 @@ void INS_Task(void *argument)
 
 void BT_RxTask(void *argument)
 {
+#if TRACKING_UART_ENABLE
+    uint32_t track_consumed_frame = 0U;
+#endif
+
     (void)argument;
 
     for (;;)
@@ -720,14 +736,18 @@ void BT_RxTask(void *argument)
             (void)ChassisSerialCmd_HandleLine(line, len);
         }
 #if TRACKING_UART_ENABLE
-        if (g_track.data_ready != 0U) {
-            float track_error;
-            uint8_t black_count;
-            g_track.data_ready = 0U;
-            track_error = Track_GetError(&g_track);
-            black_count = Track_GetBlackCount(&g_track);
-            Mode_TrackingSetError(track_error, black_count,
-                                  (uint32_t)xTaskGetTickCount());
+        {
+            Track_Snapshot_t track_snapshot;
+
+            if ((Track_GetSnapshot(&g_track, &track_snapshot) != 0U) &&
+                (track_snapshot.frame_count != 0U) &&
+                (track_snapshot.frame_count != track_consumed_frame)) {
+                track_consumed_frame = track_snapshot.frame_count;
+                Mode_TrackingSetSample(track_snapshot.error,
+                                       track_snapshot.black_count,
+                                       track_snapshot.black_mask,
+                                       (uint32_t)xTaskGetTickCount());
+            }
         }
 #endif
 
@@ -742,7 +762,20 @@ static void vofa_rx_byte_callback(uint8_t byte)
     uint8_t i;
 
     if ((byte == '\r') || (byte == '\n')) {
+        if (vofa_cmd_rx_discard != 0U) {
+            vofa_cmd_rx_discard = 0U;
+            vofa_cmd_rx_len = 0U;
+            return;
+        }
         if (vofa_cmd_rx_len > 0U) {
+            Vision_ParseResult_t vision_result =
+                Vision_ParseLine(&g_vision,
+                                 vofa_cmd_rx_buf,
+                                 vofa_cmd_rx_len);
+            if (vision_result != VISION_PARSE_NOT_VISION) {
+                vofa_cmd_rx_len = 0U;
+                return;
+            }
             if (vofa_cmd_count < VOFA_CMD_QUEUE_LEN) {
                 for (i = 0U; i < vofa_cmd_rx_len; i++) {
                     vofa_cmd_queue[vofa_cmd_head][i] = vofa_cmd_rx_buf[i];
@@ -761,10 +794,15 @@ static void vofa_rx_byte_callback(uint8_t byte)
         return;
     }
 
+    if (vofa_cmd_rx_discard != 0U) {
+        return;
+    }
+
     if (vofa_cmd_rx_len < VOFA_CMD_BUF_LEN) {
         vofa_cmd_rx_buf[vofa_cmd_rx_len++] = byte;
     } else {
         vofa_cmd_rx_len = 0U;
+        vofa_cmd_rx_discard = 1U;
         vofa_cmd_overflow_count++;
     }
 }
@@ -1033,4 +1071,9 @@ float INS_GetYawBiasDps(void)
 void INS_RequestBalanceAngleReseed(void)
 {
     balance_reseed_request = 1U;
+}
+
+uint32_t INS_GetVisionTarget(int16_t *dx, int16_t *dy, uint8_t *valid)
+{
+    return Vision_GetSnapshot(&g_vision, dx, dy, valid);
 }

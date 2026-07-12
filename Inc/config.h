@@ -200,6 +200,8 @@
 #define BALANCE_PID_BALANCE_SPEED_LIMIT_RPM 320.0f
 #define BALANCE_PID_STAND_SPEED_LIMIT_RPM   220.0f
 #define BALANCE_PID_RUNTIME_SPEED_LIMIT_MIN_RPM 120.0f
+#define BALANCE_PID_RUNTIME_KP_MAX_RPM_PER_DEG 100.0f
+/* Restore the 2026-07-11 hardware-proven upright-loop baseline. */
 #define BALANCE_PID_ANGLE_KP_RPM_PER_DEG    100.00f
 #define BALANCE_PID_ANGLE_KI_RPM_PER_DEG_S  0.0f
 /* 顶部质量升高使摆更慢(自然频率下降),相位裕度变宽,D 小步上调压顶部动量;出现高频细抖先回 0.65 */
@@ -235,6 +237,33 @@
 #define BALANCE_MODE_DRIVE_SPEED_INTEGRAL_LIMIT_M_S 0.50f
 #define BALANCE_MODE_DRIVE_THETA_REF_LIMIT_DEG 1.60f
 #define BALANCE_MODE_DRIVE_THETA_REF_SLEW_DEG_PER_SEC 8.0f
+#define BALANCE_MODE_DRIVE_INTEGRATOR_RAMP_GATE_MPS 0.002f
+#define BALANCE_MODE_DRIVE_INTEGRATOR_LEAD_LIMIT_DEG 0.20f
+#define BALANCE_MODE_START_ASSIST_ENABLE     1U
+#define BALANCE_MODE_START_ASSIST_MAX_DEG    1.10f
+#define BALANCE_MODE_START_ASSIST_SLEW_DEG_PER_SEC 2.0f
+#define BALANCE_MODE_START_ASSIST_RELEASE_DEG_PER_SEC 4.0f
+#define BALANCE_MODE_START_ASSIST_EXIT_MAX_MPS 0.035f
+#define BALANCE_MODE_START_ASSIST_EXIT_SEC   0.05f
+#define BALANCE_MODE_START_ASSIST_INTEGRATOR_GATE_DEG 0.02f
+#define BALANCE_MODE_START_ASSIST_TIMEOUT_SEC 2.0f
+#define BALANCE_MODE_BRAKE_REF_DONE_MPS      0.005f
+#define BALANCE_MODE_BRAKE_V_DONE_MPS        0.020f
+#define BALANCE_MODE_BRAKE_SETTLE_SEC        0.15f
+#define BALANCE_MODE_SETTLE_MAX_THETA_ERROR_DEG 0.40f
+#define BALANCE_MODE_SETTLE_MAX_RATE_DPS     12.0f
+#define BALANCE_MODE_SETTLE_MAX_WHEEL_RPM     6.0f
+#define BALANCE_MODE_TURN_SLEW_RPM_PER_SEC   160.0f
+#define BALANCE_MODE_TURN_SETTLE_RPM          0.50f
+#define BALANCE_MODE_TURN_SETTLE_DIFF_RPM     6.0f
+#define BALANCE_MODE_WHEEL_DIFF_KP           0.10f
+#define BALANCE_MODE_WHEEL_DIFF_LIMIT_RPM    2.0f
+#define BALANCE_MODE_WHEEL_DIFF_LPF_ALPHA    0.10f
+#define BALANCE_MODE_WHEEL_DIFF_DEADBAND_RPM 1.0f
+/* Keep disabled until yaw-rate/turn sign is verified on lifted wheels. */
+#define BALANCE_MODE_YAW_RATE_DAMP_KP_RPM_PER_DPS 0.0f
+#define BALANCE_MODE_YAW_RATE_DAMP_LIMIT_RPM 6.0f
+#define BALANCE_MODE_YAW_RATE_DAMP_SIGN      (-1.0f)
 /*
  * 前进/后退不再使用固定开环 bias(巡航速度 = (bias-摩擦角-零点误差)/Kv,
  * 摩擦(±1.4deg)和零点漂移都比 bias 本身大,只能"不走或冲")。
@@ -250,7 +279,9 @@
  * 不再从 0 重爬把车刹回坑里。bias 全部回真实平衡点 -0.8。
  */
 #define BALANCE_MODE_STAND_BIAS_DEG        -0.1f
-#define BALANCE_MODE_FORWARD_BIAS_DEG       1.7f
+/* Velocity PI owns longitudinal motion; a persistent forward bias defeats
+ * overspeed braking. Static-friction breakout is handled only in STARTING. */
+#define BALANCE_MODE_FORWARD_BIAS_DEG       BALANCE_MODE_STAND_BIAS_DEG
 #define BALANCE_MODE_BACKWARD_BIAS_DEG      BALANCE_MODE_STAND_BIAS_DEG
 #define BALANCE_MODE_BIAS_SLEW_DEG_PER_SEC  2.0f
 /*
@@ -279,12 +310,15 @@
 #define BALANCE_MODE_LAUNCH_RETRIGGER_ENABLE    0U
 #define BALANCE_MODE_LAUNCH_RETRIGGER_BELOW_MPS 0.08f
 #define BALANCE_MODE_LAUNCH_RETRIGGER_DWELL_SEC 0.50f
-#define BALANCE_MODE_DRIVE_USE_ACTUAL_BASE  0U
+/* STARTING keeps the reference-speed base that breaks static friction.
+ * RUNNING transfers ownership to measured wheel speed in 0.5 s. */
+#define BALANCE_MODE_DRIVE_USE_ACTUAL_BASE  1U
+#define BALANCE_MODE_DRIVE_BASE_BLEND_PER_SEC 2.0f
+#define BALANCE_MODE_DRIVE_ACTUAL_BASE_LPF_TAU_SEC 0.10f
 #define BALANCE_MODE_DRIVE_THETA_REF_ENABLE 1U
 #define BALANCE_MODE_STOP_BRAKE_ENABLE      1U
 #define BALANCE_MODE_STOP_BRAKE_TIME_SEC    0.80f
 #define BALANCE_MODE_STOP_BRAKE_LOCK_ON_MPS 0.10f
-#define BALANCE_MODE_STOP_BRAKE_OFF_MPS     0.05f
 /*
  * 20:02 数据:轮级反向刹车(GAIN 2.0 + 直立环 0.25 折)一次都没生效——
  * 旧激活逻辑被速度噪声(±0.03)一拍抖穿即永久清 timer。修复窗口逻辑
@@ -301,8 +335,8 @@
 #define BALANCE_MODE_STOP_BRAKE_STAND_SPEED_LIMIT_RPM 280.0f
 #define BALANCE_MODE_STOP_BRAKE_CURRENT_LIMIT_A 0.50f
 #define BALANCE_MODE_STOP_BRAKE_CURRENT_SLEW_A_PER_SEC 60.0f
-#define BALANCE_MODE_STOP_BRAKE_LOWV_EXIT_SEC  0.15f
-#define BALANCE_MODE_STOP_BRAKE_REVERSE_EXIT_MPS 0.08f
+#define BALANCE_MODE_STOP_BRAKE_EDGE_MIN_MPS 0.020f
+#define BALANCE_MODE_STOP_BRAKE_REARM_SEC    0.30f
 #define BALANCE_MODE_STOP_BRAKE_TRACK_ERR_DEG 1.2f
 #define BALANCE_MODE_BRAKE_RECOVER_ANGLE_DEG 6.0f
 /*
@@ -360,10 +394,10 @@
 #define BALANCE_ZERO_TRIM_ENABLE            1U
 #define BALANCE_ZERO_TRIM_RATE_PER_SEC      0.06f
 #define BALANCE_ZERO_TRIM_LIMIT_DEG         4.0f
-#define BALANCE_ZERO_TRIM_GATE_V_MPS        0.15f
-#define BALANCE_ZERO_TRIM_GATE_RATE_DPS     30.0f
-#define BALANCE_ZERO_TRIM_GATE_THETA_DEG    3.0f
-#define BALANCE_ZERO_TRIM_GATE_WHEEL_RPM    50.0f
+#define BALANCE_ZERO_TRIM_GATE_V_MPS        0.02f
+#define BALANCE_ZERO_TRIM_GATE_RATE_DPS     20.0f
+#define BALANCE_ZERO_TRIM_GATE_THETA_DEG    1.0f
+#define BALANCE_ZERO_TRIM_GATE_WHEEL_RPM    6.0f
 /*
  * 守卫期间积分向 0 衰减(不是冻结):冻结会让起步攒满的 +1.5deg 积分
  * 在超速时继续同向助推(v=0.4 时速度项 -1.0deg 压不过它,净 +0.5deg)。
@@ -374,13 +408,14 @@
 #define BALANCE_MODE_TURN_SPEED_RPM         16.0f
 #define TRACKING_UART_ENABLE                1U
 #define TRACKING_DATA_TIMEOUT_MS            120U
-#define TRACKING_START_SEARCH_VELOCITY_MPS  0.05f
-#define TRACKING_BASE_VELOCITY_MPS          0.06f
+#define TRACKING_START_SEARCH_VELOCITY_MPS  0.07f
+#define TRACKING_BASE_VELOCITY_MPS          0.08f
 #define TRACKING_LOST_HOLD_MS               1000U
-#define TRACKING_LOST_HOLD_VELOCITY_MPS     0.05f
+#define TRACKING_LOST_HOLD_VELOCITY_MPS     0.06f
 #define TRACKING_LOST_REFIND_MS             500U
-#define TRACKING_LOST_REFIND_VELOCITY_MPS   0.05f
-#define TRACKING_LOST_VELOCITY_MPS          0.05f
+#define TRACKING_LOST_REFIND_VELOCITY_MPS   0.06f
+/* After the short recovery window, stop translating and search in place. */
+#define TRACKING_LOST_VELOCITY_MPS          0.0f
 #define TRACKING_FORWARD_BIAS_DEG           0.0f
 #define TRACKING_TURN_KP_RPM_PER_ERROR      10.0f
 #define TRACKING_TURN_KI_RPM_PER_ERROR_S    0.0f
@@ -399,23 +434,68 @@
 #define TRACKING_SHARP_TURN_ENTER_ERROR     3.0f
 #define TRACKING_SHARP_TURN_EXIT_ERROR      1.2f
 #define TRACKING_SHARP_TURN_GATE_RPM        20.0f
-#define TRACKING_SHARP_TURN_VELOCITY_MPS    0.035f
+#define TRACKING_SHARP_TURN_VELOCITY_MPS    0.07f
 /* Course order: A start crossbar -> center target marker -> B finish crossbar. */
 #define TRACKING_BLOCK_BLACK_COUNT_MIN      7U
 #define TRACKING_TARGET_BLOCK_BLACK_COUNT_MIN 5U
-#define TRACKING_START_BLOCK_CONFIRM_MS     0U
+#define TRACKING_MARKER_MIN_FORWARD_MPS      0.020f
+#define TRACKING_START_BLOCK_CONFIRM_MS     40U
 #define TRACKING_START_BLOCK_EXIT_MS        300U
-#define TRACKING_TARGET_BLOCK_CONFIRM_MS    0U
+#define TRACKING_TARGET_BLOCK_CONFIRM_MS    80U
 #define TRACKING_TARGET_BLOCK_RUNOUT_MS     500U
 #define TRACKING_TARGET_BLOCK_RUNOUT_VELOCITY_MPS 0.04f
 #define TRACKING_TARGET_BLOCK_LASER_MS      3000U
 #define TRACKING_TARGET_BLOCK_DEPART_MS     1200U
 #define TRACKING_TARGET_BLOCK_EXIT_MS       300U
-#define TRACKING_FINISH_BLOCK_CONFIRM_MS    0U
+#define TRACKING_FINISH_BLOCK_CONFIRM_MS    40U
 #define TRACKING_FINISH_BLOCK_RUNOUT_MS     500U
 #define TRACKING_FINISH_BLOCK_RUNOUT_VELOCITY_MPS 0.04f
+#define TRACKING_REFIND_CONFIRM_MS          100U
+#define TRACKING_LASER_STOP_MAX_V_MPS       0.015f
+#define TRACKING_LASER_STOP_MAX_WHEEL_RPM   6.0f
+#define TRACKING_LASER_MAX_THETA_ERROR_DEG  0.30f
+#define TRACKING_LASER_MAX_RATE_DPS         10.0f
+#define TRACKING_LASER_MAX_TURN_RPM         0.50f
 #define TRACKING_LOST_ERROR                 7.5f
-#define TRACKING_MIN_SPEED_RATIO            0.45f
+#define TRACKING_MIN_SPEED_RATIO            0.875f
+
+/* Independent one-lap square line task (mode 6). Course tracking mode 5 keeps
+ * its own marker/laser state machine and does not consume these parameters. */
+#define SQUARE_TRACKING_BASE_VELOCITY_MPS       0.08f
+#define SQUARE_TRACKING_SHARP_VELOCITY_MPS      0.07f
+#define SQUARE_TRACKING_FORWARD_BIAS_DEG         0.0f
+#define SQUARE_TRACKING_CURVE_SLOWDOWN_ERROR    2.0f
+#define SQUARE_TRACKING_TURN_KP_RPM_PER_ERROR   10.0f
+#define SQUARE_TRACKING_TURN_LIMIT_RPM          16.0f
+#define SQUARE_TRACKING_TURN_DEADBAND_RPM        2.0f
+#define SQUARE_TRACKING_ERROR_LPF_ALPHA         0.65f
+#define SQUARE_TRACKING_TURN_DIRECTION          (-1.0f)
+#define SQUARE_TRACKING_REFIND_CONFIRM_MS       100U
+#define SQUARE_TRACKING_MAX_NEW_FRAME_GAP_MS    40U
+/* A corner is a continuous black block confined to either sensor half. The
+ * one-channel opposite-side limit rejects normal 0x7c/0xfc line patterns. */
+#define SQUARE_TRACKING_CORNER_SIDE_BLACK_MIN   3U
+#define SQUARE_TRACKING_CORNER_OTHER_BLACK_MAX  1U
+#define SQUARE_TRACKING_CORNER_MIN_FORWARD_MPS  0.020f
+#define SQUARE_TRACKING_CORNER_CONFIRM_MS       40U
+#define SQUARE_TRACKING_CORNER_REARM_MS         300U
+#define SQUARE_TRACKING_CORNER_RUNOUT_VELOCITY_MPS 0.06f
+#define SQUARE_TRACKING_CORNER_RUNOUT_MS         250U
+#define SQUARE_TRACKING_CORNER_BRAKE_TIMEOUT_MS 3000U
+#define SQUARE_TRACKING_CORNER_TURN_MIN_MS      800U
+#define SQUARE_TRACKING_CORNER_TURN_FALLBACK_MS 2200U
+#define SQUARE_TRACKING_CORNER_TURN_MAX_MS      4000U
+#define SQUARE_TRACKING_CORNER_ALIGN_MAX_MS     1800U
+#define SQUARE_TRACKING_CORNER_DEPART_ERROR     3.0f
+#define SQUARE_TRACKING_CORNER_ALIGN_VELOCITY_MPS 0.07f
+#define SQUARE_TRACKING_CORNER_ALIGN_ERROR      1.2f
+#define SQUARE_TRACKING_CORNER_ALIGN_CONFIRM_MS 100U
+#define SQUARE_TRACKING_TARGET_CORNER_COUNT     4U
+#define SQUARE_TRACKING_LOST_HOLD_MS            200U
+#define SQUARE_TRACKING_LOST_HOLD_VELOCITY_MPS  0.06f
+#define SQUARE_TRACKING_LOST_HOLD_TURN_LIMIT_RPM 6.0f
+#define SQUARE_TRACKING_LOST_BRAKE_TIMEOUT_MS   3000U
+#define SQUARE_TRACKING_LOST_SEARCH_TIMEOUT_MS  2500U
 #define BALANCE_PID_POLARITY                1.0f
 #define BALANCE_PID_POSITION_SIGN           1.0f
 #define BALANCE_PID_VELOCITY_SIGN           1.0f
@@ -548,6 +628,15 @@
  * I7 balance_ref_rpm, I8 angle_p_ref_rpm, I9 rate_d_ref_rpm
  * I10 avg_ref_rpm, I11 avg_actual_rpm, I12 avg_cmd_a
  * I13 zero_trim_deg, I14 fault, I15 chassis_mode
+ */
+/* TRACK_ADC fused-control map (raw x1..x8 ADC values are intentionally
+ * omitted):
+ * I0 track_error, I1 chassis_mode, I2 motion_state
+ * I3 command_velocity_mps, I4 target_velocity_mps, I5 actual_velocity_mps
+ * I6/I7 left target/actual rpm, I8/I9 right target/actual rpm
+ * I10/I11 target/actual theta deg, I12 fused black mask
+ * I13 square phase, I14 completed square corner count
+ * I15 stop-brake state bitfield
  */
 #define VOFA_OUTPUT_ENABLE           1
 #define VOFA_OUTPUT_DIVIDER          5U

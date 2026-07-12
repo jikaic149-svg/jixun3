@@ -13,6 +13,15 @@ typedef enum {
     CHASSIS_MOTOR_BALANCE_PID
 } ChassisMotorState_e;
 
+/* High-level modes describe the requested task. This state describes how the
+ * balance controller is executing the longitudinal start/stop transition. */
+typedef enum {
+    BALANCE_MOTION_HOLD = 0,
+    BALANCE_MOTION_STARTING,
+    BALANCE_MOTION_RUNNING,
+    BALANCE_MOTION_BRAKING
+} BalanceMotionState_e;
+
 typedef enum {
     BALANCE_PID_RUNTIME_KP = 0,
     BALANCE_PID_RUNTIME_KI,
@@ -29,6 +38,9 @@ extern volatile uint8_t chassis_motor_enabled_ok;
 extern volatile uint8_t chassis_speed_test_armed;
 extern volatile uint8_t chassis_fault_code;
 extern volatile uint8_t emergency_stop;
+extern volatile BalanceMotionState_e balance_motion_state;
+extern volatile uint8_t chassis_laser_safe;
+extern volatile uint8_t balance_stop_brake_state;
 
 extern volatile float wheel_speed_ref_left_rpm;
 extern volatile float wheel_speed_actual_left_rpm;

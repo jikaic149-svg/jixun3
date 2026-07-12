@@ -4,6 +4,8 @@
 
 void Mode_TurnRightBuild(ModeCommand_t *command)
 {
-    Mode_CommandClear(command);
-    command->turn_rpm = -BALANCE_MODE_TURN_SPEED_RPM;
+    Mode_MotionBuild(command,
+                     0.0f,
+                     BALANCE_MODE_STAND_BIAS_DEG,
+                     -BALANCE_MODE_TURN_SPEED_RPM);
 }

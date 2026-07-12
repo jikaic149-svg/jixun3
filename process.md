@@ -5306,3 +5306,30 @@ speed_theta_ref = BALANCE_POSITION_KP × position_error +
 - 新增 `GIMBAL_YAW_CURRENT_COMMAND_ENABLE=0`；该配置会在编译期移除 yaw 的
   `Motor_SetCurrent()` 调用，因此不会发送非零电流，也不会发送 0A 保活电流帧。
 - `mode_gimbal` 暂时只计算 HOLD/AIM 目标和控制量，待确认允许输出后再显式打开该开关。
+
+# MaixCAM2 bidirectional UART and UDP telemetry (2026-07-11)
+
+- The MCU transport remains USART6 on PG14 TX and PG9 RX at 115200 8N1.
+- MaixCAM2 sends ASCII target lines as `dx,dy,valid\n`. `dx` and `dy` must be
+  within `-2048..2048`, and `valid` must be either 0 or 1.
+- Vision parsing now has three results: valid target, invalid target candidate,
+  and non-vision command. A line whose first non-space character is numeric or
+  a sign and which contains a comma is always consumed by the vision parser.
+- Invalid candidates such as `5,0,2`, `5000,0,1`, and `5,` are counted and
+  discarded. They cannot fall through to chassis mode or wheel-speed parsing.
+- Existing bare `0..5`, English mode names, bias, PID, and speed commands remain
+  compatible because non-vision lines continue through the original command
+  queue.
+- STM32 telemetry to MaixCAM2 remains the existing VOFA FireWater numeric CSV,
+  with the Git channel order and 20 ms output period unchanged. MaixCAM2 forwards
+  valid telemetry to PC UDP port 5005; the PC bridge forwards it to VOFA+ port
+  5006 and relays commands through MaixCAM2 UDP port 5007.
+- `Vision_GetSnapshot()` and `INS_GetVisionTarget()` expose a coherent target
+  snapshot for diagnostics or later integration. No chassis, yaw, motor, or
+  laser control consumes this snapshot in the current firmware.
+- Verification completed with a clean ARM GCC build and link: text 52088 B,
+  data 180 B, bss 27284 B. The vision parser also passed `-Wall -Wextra
+  -Werror`, and a Cortex-M Thumb emulation test returned 0 for valid boundary
+  frames, malformed numeric candidates, snapshot preservation, and legacy
+  command classification. The sibling Python project passed `py_compile`, all
+  9 unit tests, and a bidirectional UDP telemetry/command loopback.
