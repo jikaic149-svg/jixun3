@@ -650,6 +650,11 @@
               <FilePath>../mode/mode_tracking.c</FilePath>
             </File>
             <File>
+              <FileName>mode_square_tracking.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../mode/mode_square_tracking.c</FilePath>
+            </File>
+            <File>
               <FileName>mode_gimbal.c</FileName>
               <FileType>1</FileType>
               <FilePath>../mode/mode_gimbal.c</FilePath>
