@@ -1913,10 +1913,10 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
         balance_speed_ref_rpm *= BALANCE_MODE_STOP_BRAKE_BALANCE_SCALE;
     }
 
-    /* STARTING keeps the reference-speed base long enough to break static
-     * friction. RUNNING then blends to a low-passed measured-wheel base,
-     * leaving the velocity PI as the only steady-state speed authority while
-     * preserving wheel-loop damping at the 8 Hz body oscillation. */
+    /* STARTING keeps the full reference-speed base to break static friction.
+     * RUNNING transfers only bounded ownership to measured wheel speed, so a
+     * small reference base remains available instead of falling back into the
+     * measured 8 Hz stick-slip cycle. */
     drive_base_rpm = 0.0f;
     drive_reference_base_rpm = BALANCE_PID_VELOCITY_SIGN *
                                balance_velocity_ref_ramp_mps /
@@ -1952,6 +1952,7 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
                 balance_drive_actual_base_blend,
                 BALANCE_PID_DT_SEC,
                 BALANCE_MODE_DRIVE_BASE_BLEND_PER_SEC,
+                BALANCE_MODE_DRIVE_ACTUAL_BASE_BLEND_MAX,
                 (balance_motion_state == BALANCE_MOTION_RUNNING) ? 1U : 0U);
         drive_base_rpm = drive_reference_base_rpm +
                          balance_drive_actual_base_blend *

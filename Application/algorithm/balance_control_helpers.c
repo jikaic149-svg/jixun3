@@ -169,21 +169,27 @@ uint8_t BalanceControl_QuietConfirmed(uint8_t quiet,
 float BalanceControl_UpdateActualBaseBlend(float blend,
                                            float dt_sec,
                                            float blend_per_sec,
+                                           float maximum_blend,
                                            uint8_t running)
 {
+    float target_blend = balance_helpers_absf(maximum_blend);
+
     if (running == 0U) {
         return 0.0f;
     }
+    if (target_blend > 1.0f) {
+        target_blend = 1.0f;
+    }
     if (blend < 0.0f) {
         blend = 0.0f;
-    } else if (blend > 1.0f) {
-        blend = 1.0f;
+    } else if (blend > target_blend) {
+        blend = target_blend;
     }
     if (dt_sec <= 0.0f) {
         return blend;
     }
     return balance_helpers_step_towards(
-        blend, 1.0f,
+        blend, target_blend,
         balance_helpers_absf(blend_per_sec) * dt_sec);
 }
 

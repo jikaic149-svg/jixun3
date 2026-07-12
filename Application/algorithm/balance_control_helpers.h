@@ -40,6 +40,7 @@ uint8_t BalanceControl_QuietConfirmed(uint8_t quiet,
 float BalanceControl_UpdateActualBaseBlend(float blend,
                                            float dt_sec,
                                            float blend_per_sec,
+                                           float maximum_blend,
                                            uint8_t running);
 
 float BalanceControl_UpdateLowPass(float filtered,

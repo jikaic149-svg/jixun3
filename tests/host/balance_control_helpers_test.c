@@ -141,29 +141,33 @@ static void test_actual_base_blend_is_deterministic(void)
 
     for (uint16_t i = 0U; i < 250U; i++) {
         blend = BalanceControl_UpdateActualBaseBlend(
-            blend, 0.001f, 2.0f, 1U);
+            blend, 0.001f, 2.0f, 0.65f, 1U);
     }
     check_near(blend, 0.50f,
                "actual-base blend must reach half in 0.25 seconds");
 
     for (uint16_t i = 0U; i < 250U; i++) {
         blend = BalanceControl_UpdateActualBaseBlend(
-            blend, 0.001f, 2.0f, 1U);
+            blend, 0.001f, 2.0f, 0.65f, 1U);
     }
-    check_near(blend, 1.0f,
-               "actual-base blend must finish in 0.5 seconds");
+    check_near(blend, 0.65f,
+               "actual-base ownership must stop at the configured maximum");
     check_near(BalanceControl_UpdateActualBaseBlend(
-                   blend, 0.001f, 2.0f, 0U),
+                   blend, 0.001f, 2.0f, 0.65f, 0U),
                0.0f,
                "leaving RUNNING must reset actual-base ownership");
     check_near(BalanceControl_UpdateActualBaseBlend(
-                   0.4f, 0.0f, 2.0f, 1U),
+                   0.4f, 0.0f, 2.0f, 0.65f, 1U),
                0.4f,
                "invalid dt must not change actual-base ownership");
     check_near(BalanceControl_UpdateActualBaseBlend(
-                   1.2f, 0.001f, 2.0f, 1U),
+                   1.2f, 0.001f, 2.0f, 0.65f, 1U),
+               0.65f,
+               "actual-base ownership must clamp to its configured maximum");
+    check_near(BalanceControl_UpdateActualBaseBlend(
+                   0.0f, 1.0f, 2.0f, 2.0f, 1U),
                1.0f,
-               "actual-base ownership must remain saturated");
+               "actual-base ownership maximum must remain bounded to one");
 }
 
 static void test_actual_base_low_pass(void)
