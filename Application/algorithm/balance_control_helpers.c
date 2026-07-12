@@ -295,6 +295,26 @@ uint8_t BalanceControl_StopReleaseConfirmed(float signed_velocity_mps,
     return (*confirm_timer_sec >= confirm_sec) ? 1U : 0U;
 }
 
+uint8_t BalanceControl_StopZeroCrossed(float velocity_mps,
+                                       float entry_direction,
+                                       float max_cross_velocity_mps)
+{
+    float direction;
+
+    if (entry_direction > 0.0f) {
+        direction = 1.0f;
+    } else if (entry_direction < 0.0f) {
+        direction = -1.0f;
+    } else {
+        return 0U;
+    }
+    if (balance_helpers_absf(velocity_mps) >
+        balance_helpers_absf(max_cross_velocity_mps)) {
+        return 0U;
+    }
+    return ((velocity_mps * direction) <= 0.0f) ? 1U : 0U;
+}
+
 uint8_t BalanceControl_StopReboundConfirmed(float velocity_mps,
                                             float dt_sec,
                                             float rebound_velocity_mps,

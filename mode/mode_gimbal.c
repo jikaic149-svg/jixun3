@@ -177,6 +177,7 @@ void Mode_GimbalUpdate(float encoder_angle_deg,
     float target_angle_deg;
     float raw_error_deg;
     float control_error_deg;
+    float static_feedforward_a;
     float output_current_a;
 
     gimbal_clear_command();
@@ -247,10 +248,40 @@ void Mode_GimbalUpdate(float encoder_angle_deg,
             gimbal_limit(gimbal_integral_a, GIMBAL_YAW_INTEGRAL_LIMIT_A);
     }
 
+    static_feedforward_a = 0.0f;
+    if ((control_error_deg != 0.0f) &&
+        (gimbal_absf(gimbal_filtered_speed_rpm) <
+         GIMBAL_YAW_STATIC_FF_MAX_SPEED_RPM)) {
+        float abs_speed_rpm = gimbal_absf(gimbal_filtered_speed_rpm);
+        float static_scale = 1.0f;
+
+        if (abs_speed_rpm > GIMBAL_YAW_STATIC_FF_FULL_SPEED_RPM) {
+            float taper_span_rpm =
+                GIMBAL_YAW_STATIC_FF_MAX_SPEED_RPM -
+                GIMBAL_YAW_STATIC_FF_FULL_SPEED_RPM;
+
+            if (taper_span_rpm > 0.001f) {
+                static_scale =
+                    (GIMBAL_YAW_STATIC_FF_MAX_SPEED_RPM - abs_speed_rpm) /
+                    taper_span_rpm;
+            } else {
+                static_scale = 0.0f;
+            }
+            static_scale = gimbal_limit(static_scale, 1.0f);
+            if (static_scale < 0.0f) {
+                static_scale = 0.0f;
+            }
+        }
+        static_feedforward_a = (control_error_deg > 0.0f) ?
+                               GIMBAL_YAW_STATIC_FF_A * static_scale :
+                               -GIMBAL_YAW_STATIC_FF_A * static_scale;
+    }
+
     output_current_a =
         (GIMBAL_YAW_KP_A_PER_DEG * control_error_deg +
          gimbal_integral_a -
-         GIMBAL_YAW_KD_A_PER_RPM * gimbal_filtered_speed_rpm) *
+         GIMBAL_YAW_KD_A_PER_RPM * gimbal_filtered_speed_rpm +
+         static_feedforward_a) *
         GIMBAL_YAW_CONTROL_SIGN;
     output_current_a =
         gimbal_limit(output_current_a, GIMBAL_YAW_CURRENT_LIMIT_A);

@@ -124,16 +124,20 @@
 #define GIMBAL_YAW_CONTROL_DT_SEC          0.001f
 #define GIMBAL_YAW_SOFT_LIMIT_DEG         120.0f
 #define GIMBAL_YAW_MAX_ERROR_DEG          8.0f
-#define GIMBAL_YAW_DEADBAND_DEG           0.35f
+#define GIMBAL_YAW_DEADBAND_DEG           0.15f
 #define GIMBAL_YAW_INTEGRAL_ZONE_DEG      2.0f
 #define GIMBAL_YAW_KP_A_PER_DEG           0.036f
-#define GIMBAL_YAW_KI_A_PER_DEG_S         0.009f
-#define GIMBAL_YAW_KD_A_PER_RPM           0.0050f
-#define GIMBAL_YAW_INTEGRAL_LIMIT_A       0.015f
+#define GIMBAL_YAW_KI_A_PER_DEG_S         0.012f
+#define GIMBAL_YAW_KD_A_PER_RPM           0.0025f
+#define GIMBAL_YAW_INTEGRAL_LIMIT_A       0.025f
+#define GIMBAL_YAW_STATIC_FF_A            0.015f
+#define GIMBAL_YAW_STATIC_FF_FULL_SPEED_RPM 0.5f
+#define GIMBAL_YAW_STATIC_FF_MAX_SPEED_RPM  2.0f
 /* Bring-up clamp; raise only after encoder/current polarity is verified. */
 #define GIMBAL_YAW_CURRENT_LIMIT_A        0.30f
 #define GIMBAL_YAW_CURRENT_SLEW_A_PER_SEC 2.0f
-#define GIMBAL_YAW_SPEED_LPF_ALPHA        0.30f
+/* Old-sample weight: larger values reject more quantized CAN speed noise. */
+#define GIMBAL_YAW_SPEED_LPF_ALPHA        0.80f
 #define GIMBAL_YAW_CHASSIS_SPEED_FF_DEG_PER_MPS 1.50f
 #define GIMBAL_YAW_CHASSIS_SPEED_FF_LIMIT_DEG   0.20f
 #define GIMBAL_YAW_COMMAND_PERIOD_MS      5U
@@ -146,7 +150,7 @@
 #define VISION_YAW_FRAME_TIMEOUT_MS        150U
 #define VISION_YAW_CURRENT_STOP_TIMEOUT_MS 1000U
 #define VISION_YAW_MAX_CORRECTION_DEG      8.0f
-#define VISION_YAW_CAPTURE_LIMIT_DEG       45.0f
+#define VISION_YAW_CAPTURE_LIMIT_DEG       60.0f
 
 /* 离地左轮 ESO+PI 轮速测试：上电默认急停，按键授权后才输出非零电流。 */
 #define WHEEL_SPEED_TEST_ENABLE             0U
@@ -350,7 +354,11 @@
 #define BALANCE_MODE_STOP_BRAKE_CURRENT_LIMIT_A 0.50f
 #define BALANCE_MODE_STOP_BRAKE_CURRENT_SLEW_A_PER_SEC 60.0f
 #define BALANCE_MODE_STOP_BRAKE_EDGE_MIN_MPS 0.020f
-#define BALANCE_MODE_STOP_BRAKE_REARM_SEC    0.30f
+#define BALANCE_MODE_STOP_ZERO_CROSS_MAX_MPS 0.025f
+#define BALANCE_MODE_STOP_RELEASE_V_MPS      0.005f
+#define BALANCE_MODE_STOP_RELEASE_CONFIRM_SEC 0.030f
+#define BALANCE_MODE_STOP_REBOUND_V_MPS      0.025f
+#define BALANCE_MODE_STOP_REBOUND_CONFIRM_SEC 0.050f
 #define BALANCE_MODE_STOP_BRAKE_TRACK_ERR_DEG 1.2f
 #define BALANCE_MODE_BRAKE_RECOVER_ANGLE_DEG 6.0f
 /*
@@ -477,6 +485,7 @@
  * a continuously observed all-white sensor frame. */
 #define TARGET_AIM_LINE_CONFIRM_MS          60U
 #define TARGET_AIM_WHITE_CONFIRM_MS         40U
+#define TARGET_AIM_STOP_ABORT_CONFIRM_MS    100U
 #define TARGET_AIM_LINE_BLACK_COUNT_MAX     5U
 #define TARGET_AIM_TURN_LIMIT_RPM           8.0f
 #define TARGET_AIM_WIDE_START_PROBE_VELOCITY_MPS 0.05f
@@ -664,6 +673,16 @@
  * I13 square phase, I14 completed square corner count
  * I15 stop-brake state bitfield
  */
+/* STOP_CONTROL map:
+ * I0 chassis mode, I1 target phase, I2 motion state
+ * I3 command velocity, I4 internal ramp velocity, I5 actual velocity
+ * I6 stop-position reference, I7 actual position
+ * I8/I9 left target/actual rpm, I10/I11 right target/actual rpm
+ * I12/I13 target/actual theta, I14 stop-brake state, I15 turn reference
+ * stop-brake bits: b0 damping, b1 positive velocity, b2 negative velocity,
+ * b3 position hold, b4 release confirmation, b5 rebound confirmation,
+ * b6 high-authority window.
+ */
 #define VOFA_OUTPUT_ENABLE           1
 #define VOFA_OUTPUT_DIVIDER          5U
 #define VOFA_OUTPUT_PERIOD_MS        20U
@@ -674,6 +693,7 @@
 #define VOFA_DEBUG_STAGE_TRACK_ADC      4U
 #define VOFA_DEBUG_STAGE_YAW_CAN        5U
 #define VOFA_DEBUG_STAGE_TARGET_AIM     6U
+#define VOFA_DEBUG_STAGE_STOP_CONTROL   7U
 #define VOFA_DEBUG_STAGE                VOFA_DEBUG_STAGE_TARGET_AIM
 #if VOFA_OUTPUT_MODE == VOFA_OUTPUT_MODE_ENCODER
 #if VOFA_DEBUG_STAGE == VOFA_DEBUG_STAGE_MOTOR_FEEDBACK
@@ -688,6 +708,8 @@
 #define VOFA_OUTPUT_CHANNEL_COUNT    12U
 #elif VOFA_DEBUG_STAGE == VOFA_DEBUG_STAGE_TARGET_AIM
 #define VOFA_OUTPUT_CHANNEL_COUNT    24U
+#elif VOFA_DEBUG_STAGE == VOFA_DEBUG_STAGE_STOP_CONTROL
+#define VOFA_OUTPUT_CHANNEL_COUNT    16U
 #elif VOFA_DEBUG_STAGE == VOFA_DEBUG_STAGE_BALANCE_CASCADE
 #define VOFA_OUTPUT_CHANNEL_COUNT    16U
 #else

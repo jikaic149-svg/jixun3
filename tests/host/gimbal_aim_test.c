@@ -239,6 +239,62 @@ static void test_deadband_does_not_accumulate_current(void)
     }
 }
 
+static void test_static_friction_feedforward_is_gated(void)
+{
+    GimbalCommand_t command;
+    const float small_error_deg = GIMBAL_YAW_DEADBAND_DEG + 0.05f;
+
+    capture_center(GIMBAL_MODE_AIM, 200.0f);
+    Mode_GimbalSetTargetOffsetDeg(small_error_deg);
+    for (uint8_t i = 0U; i < 30U; i++) {
+        Mode_GimbalUpdate(200.0f, 0.0f, 1U,
+                          GIMBAL_YAW_CONTROL_DT_SEC);
+    }
+    command = get_command();
+    CHECK(command.yaw_current_a * GIMBAL_YAW_CONTROL_SIGN >
+              GIMBAL_YAW_STATIC_FF_A * 0.80f,
+          "low-speed positive error must receive static-friction feedforward");
+
+    capture_center(GIMBAL_MODE_AIM, 200.0f);
+    Mode_GimbalSetTargetOffsetDeg(-small_error_deg);
+    for (uint8_t i = 0U; i < 30U; i++) {
+        Mode_GimbalUpdate(200.0f, 0.0f, 1U,
+                          GIMBAL_YAW_CONTROL_DT_SEC);
+    }
+    command = get_command();
+    CHECK(command.yaw_current_a * GIMBAL_YAW_CONTROL_SIGN <
+              -GIMBAL_YAW_STATIC_FF_A * 0.80f,
+          "low-speed negative error must reverse static-friction feedforward");
+
+    capture_center(GIMBAL_MODE_AIM, 200.0f);
+    Mode_GimbalSetTargetOffsetDeg(small_error_deg);
+    for (uint8_t i = 0U; i < 40U; i++) {
+        Mode_GimbalUpdate(
+            200.0f,
+            0.5f * (GIMBAL_YAW_STATIC_FF_FULL_SPEED_RPM +
+                    GIMBAL_YAW_STATIC_FF_MAX_SPEED_RPM),
+            1U,
+            GIMBAL_YAW_CONTROL_DT_SEC);
+    }
+    command = get_command();
+    CHECK(command.yaw_current_a * GIMBAL_YAW_CONTROL_SIGN > 0.0f &&
+              command.yaw_current_a * GIMBAL_YAW_CONTROL_SIGN <
+                  GIMBAL_YAW_STATIC_FF_A * 0.80f,
+          "static-friction feedforward must taper smoothly with yaw speed");
+
+    capture_center(GIMBAL_MODE_AIM, 200.0f);
+    Mode_GimbalSetTargetOffsetDeg(small_error_deg);
+    for (uint8_t i = 0U; i < 30U; i++) {
+        Mode_GimbalUpdate(200.0f,
+                          GIMBAL_YAW_STATIC_FF_MAX_SPEED_RPM + 1.0f,
+                          1U,
+                          GIMBAL_YAW_CONTROL_DT_SEC);
+    }
+    command = get_command();
+    CHECK(absf(command.yaw_current_a) < GIMBAL_YAW_STATIC_FF_A,
+          "moving yaw must not receive static-friction feedforward");
+}
+
 static void test_relax_exit_clears_current_immediately(void)
 {
     GimbalCommand_t command;
@@ -327,6 +383,7 @@ int main(void)
     test_visual_capture_window();
     test_pid_current_limit_and_slew_limit();
     test_deadband_does_not_accumulate_current();
+    test_static_friction_feedforward_is_gated();
     test_relax_exit_clears_current_immediately();
     test_chassis_speed_feedforward_only_offsets_yaw_target();
 

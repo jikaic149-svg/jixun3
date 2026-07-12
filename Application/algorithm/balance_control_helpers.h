@@ -74,6 +74,10 @@ uint8_t BalanceControl_StopReleaseConfirmed(float signed_velocity_mps,
                                             float confirm_sec,
                                             float *confirm_timer_sec);
 
+uint8_t BalanceControl_StopZeroCrossed(float velocity_mps,
+                                       float entry_direction,
+                                       float max_cross_velocity_mps);
+
 uint8_t BalanceControl_StopReboundConfirmed(float velocity_mps,
                                             float dt_sec,
                                             float rebound_velocity_mps,

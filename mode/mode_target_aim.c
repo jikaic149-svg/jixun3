@@ -10,10 +10,12 @@ static volatile ModeTargetAimPhase_e target_aim_phase =
 static float target_aim_clock_sec = 0.0f;
 static float target_aim_line_start_sec = 0.0f;
 static float target_aim_white_start_sec = 0.0f;
+static float target_aim_stop_abort_start_sec = 0.0f;
 static float target_aim_probe_elapsed_sec = 0.0f;
 static float target_aim_follow_wide_elapsed_sec = 0.0f;
 static uint8_t target_aim_line_confirming = 0U;
 static uint8_t target_aim_white_confirming = 0U;
+static uint8_t target_aim_stop_abort_confirming = 0U;
 
 static void target_aim_build_hold(ModeCommand_t *command)
 {
@@ -38,6 +40,12 @@ static void target_aim_reset_white_confirmation(void)
 {
     target_aim_white_confirming = 0U;
     target_aim_white_start_sec = target_aim_clock_sec;
+}
+
+static void target_aim_reset_stop_abort_confirmation(void)
+{
+    target_aim_stop_abort_confirming = 0U;
+    target_aim_stop_abort_start_sec = target_aim_clock_sec;
 }
 
 static void target_aim_reset_wide_probe(void)
@@ -111,10 +119,12 @@ void Mode_TargetAimReset(void)
     target_aim_clock_sec = 0.0f;
     target_aim_line_start_sec = 0.0f;
     target_aim_white_start_sec = 0.0f;
+    target_aim_stop_abort_start_sec = 0.0f;
     target_aim_probe_elapsed_sec = 0.0f;
     target_aim_follow_wide_elapsed_sec = 0.0f;
     target_aim_line_confirming = 0U;
     target_aim_white_confirming = 0U;
+    target_aim_stop_abort_confirming = 0U;
 }
 
 ModeTargetAimPhase_e Mode_TargetAimGetPhase(void)
@@ -247,20 +257,16 @@ void Mode_TargetAimBuild(ModeCommand_t *command,
             return;
         }
 
-        if (target_aim_confirm_on_new_frame(
-                all_white,
-                sensor_new_frame,
+        if ((all_white != 0U) && (sensor_new_frame != 0U)) {
+            target_aim_phase = MODE_TARGET_AIM_PHASE_STOP_CONFIRM;
+            target_aim_reset_white_confirmation();
+            target_aim_reset_stop_abort_confirmation();
+            (void)target_aim_confirm_on_new_frame(
+                1U,
+                1U,
                 TARGET_AIM_WHITE_CONFIRM_MS,
                 &target_aim_white_confirming,
-                &target_aim_white_start_sec) != 0U) {
-            target_aim_phase = MODE_TARGET_AIM_PHASE_AIM_HOLD;
-            target_aim_build_hold(command);
-            return;
-        }
-
-        if (target_aim_white_confirming != 0U) {
-            /* Stop on the first all-white frame. Confirmation happens while
-             * stationary so an old turn command cannot carry the car away. */
+                &target_aim_white_start_sec);
             target_aim_build_hold(command);
             return;
         }
@@ -281,6 +287,53 @@ void Mode_TargetAimBuild(ModeCommand_t *command,
         }
 
         target_aim_reset_wide_probe();
+        return;
+
+    case MODE_TARGET_AIM_PHASE_STOP_CONFIRM:
+        if (drive_enabled == 0U) {
+            target_aim_reset_follow_state();
+            target_aim_phase = MODE_TARGET_AIM_PHASE_STATIC_AIM;
+            target_aim_reset_white_confirmation();
+            target_aim_reset_stop_abort_confirmation();
+            return;
+        }
+        if (sensor_fresh == 0U) {
+            target_aim_reset_white_confirmation();
+            target_aim_reset_stop_abort_confirmation();
+            return;
+        }
+        if (all_white != 0U) {
+            target_aim_reset_stop_abort_confirmation();
+            if (target_aim_confirm_on_new_frame(
+                    1U,
+                    sensor_new_frame,
+                    TARGET_AIM_WHITE_CONFIRM_MS,
+                    &target_aim_white_confirming,
+                    &target_aim_white_start_sec) != 0U) {
+                target_aim_phase = MODE_TARGET_AIM_PHASE_AIM_HOLD;
+            }
+            return;
+        }
+
+        target_aim_reset_white_confirmation();
+        if (line_visible != 0U) {
+            if (target_aim_confirm_on_new_frame(
+                    1U,
+                    sensor_new_frame,
+                    TARGET_AIM_STOP_ABORT_CONFIRM_MS,
+                    &target_aim_stop_abort_confirming,
+                    &target_aim_stop_abort_start_sec) != 0U) {
+                target_aim_phase = MODE_TARGET_AIM_PHASE_FOLLOW_LINE;
+                target_aim_reset_wide_probe();
+                target_aim_build_line_follow(
+                    command, error, sensor_flags, dt_sec);
+            }
+            return;
+        }
+
+        /* Wide black and ambiguous frames can be caused by rollback over the
+         * line. They are never permission to restart forward motion. */
+        target_aim_reset_stop_abort_confirmation();
         return;
 
     case MODE_TARGET_AIM_PHASE_AIM_HOLD:

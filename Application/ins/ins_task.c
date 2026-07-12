@@ -696,6 +696,34 @@ void INS_Task(void *argument)
                     vofa_header_sent = 1U;
                 }
             }
+#elif VOFA_DEBUG_STAGE == VOFA_DEBUG_STAGE_STOP_CONTROL
+            ModeCommand_t vofa_mode_command;
+
+            Mode_GetCommand(&vofa_mode_command);
+            float vofa_channels[VOFA_OUTPUT_CHANNEL_COUNT] = {
+                (float)chassis_mode,
+                (float)Mode_TargetAimGetPhase(),
+                (float)balance_motion_state,
+                vofa_mode_command.velocity_mps,
+                balance_pid_velocity_ref_mps,
+                balance_pid_velocity_mps,
+                balance_pid_position_ref_m,
+                balance_pid_position_m,
+                wheel_speed_ref_left_rpm,
+                wheel_speed_actual_left_rpm,
+                wheel_speed_ref_right_rpm,
+                wheel_speed_actual_right_rpm,
+                balance_pid_theta_ref_deg,
+                balance_pid_theta_deg,
+                (float)balance_stop_brake_state,
+                balance_pid_turn_speed_ref_rpm
+            };
+            if (vofa_header_sent == 0U) {
+                (void)Vofa_SendText(
+                    &g_vofa,
+                    "mode,target_phase,motion,cmd_v,ramp_v,v,stop_pos_ref,pos,left_ref_rpm,left_rpm,right_ref_rpm,right_rpm,theta_ref,theta,stop_state,turn_ref_rpm\r\n");
+                vofa_header_sent = 1U;
+            }
 #else
             float vofa_balance_angle_deg = balance_pid_theta_deg;
             float vofa_balance_angle_reference_deg = balance_pid_theta_ref_deg;

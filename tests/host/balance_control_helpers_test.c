@@ -399,6 +399,20 @@ static void test_stop_rebound_and_brake_direction(void)
                "viscous brake attitude must respect its limit");
 }
 
+static void test_stop_zero_cross_capture(void)
+{
+    CHECK(BalanceControl_StopZeroCrossed(0.010f, 1.0f, 0.025f) == 0U,
+          "forward braking must remain active before zero crossing");
+    CHECK(BalanceControl_StopZeroCrossed(-0.001f, 1.0f, 0.025f) != 0U,
+          "forward stop must capture the first near-zero reverse sample");
+    CHECK(BalanceControl_StopZeroCrossed(0.001f, -1.0f, 0.025f) != 0U,
+          "reverse stop must capture the first near-zero forward sample");
+    CHECK(BalanceControl_StopZeroCrossed(-0.040f, 1.0f, 0.025f) == 0U,
+          "an implausibly large sign jump must not release braking");
+    CHECK(BalanceControl_StopZeroCrossed(0.0f, 0.0f, 0.025f) == 0U,
+          "a stop without an entry direction must use quiet confirmation");
+}
+
 int main(void)
 {
     test_assist_transfer_is_continuous();
@@ -411,6 +425,7 @@ int main(void)
     test_integral_actions();
     test_stop_release_rejects_sign_noise();
     test_stop_rebound_and_brake_direction();
+    test_stop_zero_cross_capture();
 
     if (failures != 0) {
         printf("%d balance helper assertion(s) failed\n", failures);

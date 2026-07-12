@@ -195,21 +195,41 @@ static void test_white_confirmation_and_latched_stop(void)
     CHECK(command.drive_enabled != 0U,
           "line following must command forward motion");
 
-    run_frames((TARGET_AIM_WHITE_CONFIRM_MS > 10U) ?
-                   TARGET_AIM_WHITE_CONFIRM_MS - 10U : 1U,
-               10U, TRACK_LOST_LINE, 0U, 0U, 1U);
     command = build(TRACK_LOST_LINE, 0U, 0U,
-                    MODE_TRACKING_SENSOR_FRESH, 1U);
-    CHECK(Mode_TargetAimGetPhase() == MODE_TARGET_AIM_PHASE_FOLLOW_LINE,
-          "short white contact must not stop the task");
+                    MODE_TRACKING_SENSOR_FRESH |
+                    MODE_TRACKING_SENSOR_NEW_FRAME,
+                    1U);
+    CHECK(Mode_TargetAimGetPhase() ==
+              MODE_TARGET_AIM_PHASE_STOP_CONFIRM,
+          "first white frame must enter stop confirmation");
     CHECK(command.drive_enabled == 0U && command.turn_rpm == 0.0f &&
               line_follow_calls == calls_before_white,
-          "white confirmation must stop without reusing an old turn command");
+          "stop confirmation must not reuse an old turn command");
 
-    (void)build(0.25f, 1U, 0x08U,
-                MODE_TRACKING_SENSOR_FRESH |
-                MODE_TRACKING_SENSOR_NEW_FRAME,
-                1U);
+    command = build(0.25f, 1U, 0x08U,
+                    MODE_TRACKING_SENSOR_FRESH |
+                    MODE_TRACKING_SENSOR_NEW_FRAME,
+                    1U);
+    CHECK(Mode_TargetAimGetPhase() ==
+              MODE_TARGET_AIM_PHASE_STOP_CONFIRM,
+          "one line frame must not abort a candidate stop");
+    CHECK(command.drive_enabled == 0U,
+          "line noise during stop confirmation must remain stopped");
+
+    command = build(0.0f, 8U, 0xFFU,
+                    MODE_TRACKING_SENSOR_FRESH |
+                    MODE_TRACKING_SENSOR_NEW_FRAME,
+                    1U);
+    CHECK(Mode_TargetAimGetPhase() ==
+              MODE_TARGET_AIM_PHASE_STOP_CONFIRM &&
+              command.drive_enabled == 0U,
+          "wide black after white must never restart forward motion");
+
+    run_frames(TARGET_AIM_STOP_ABORT_CONFIRM_MS + 30U,
+               10U, 0.25f, 1U, 0x08U, 1U);
+    CHECK(Mode_TargetAimGetPhase() == MODE_TARGET_AIM_PHASE_FOLLOW_LINE,
+          "only a continuous normal line may abort stop confirmation");
+
     run_frames(TARGET_AIM_WHITE_CONFIRM_MS + 30U,
                10U, TRACK_LOST_LINE, 0U, 0U, 1U);
     CHECK(Mode_TargetAimGetPhase() == MODE_TARGET_AIM_PHASE_AIM_HOLD,
@@ -277,22 +297,24 @@ static void test_stale_data_stops_without_finishing(void)
     ModeCommand_t command;
 
     enter_follow_line();
-    command = build(TRACK_LOST_LINE, 0U, 0U, 0U, 1U);
+    command = build(TRACK_LOST_LINE, 0U, 0U,
+                    MODE_TRACKING_SENSOR_FRESH |
+                    MODE_TRACKING_SENSOR_NEW_FRAME,
+                    1U);
     CHECK(command.drive_enabled == 0U,
-          "stale tracking data must stop immediately");
-    CHECK(Mode_TargetAimGetPhase() == MODE_TARGET_AIM_PHASE_FOLLOW_LINE,
-          "stale data must not be interpreted as a white finish");
+          "first white frame must stop immediately");
+    CHECK(Mode_TargetAimGetPhase() ==
+              MODE_TARGET_AIM_PHASE_STOP_CONFIRM,
+          "white candidate must enter stop confirmation");
 
-    run_frames((TARGET_AIM_WHITE_CONFIRM_MS > 10U) ?
-                   TARGET_AIM_WHITE_CONFIRM_MS - 10U : 1U,
-               10U, TRACK_LOST_LINE, 0U, 0U, 1U);
     (void)build(TRACK_LOST_LINE, 0U, 0U, 0U, 1U);
     (void)build(TRACK_LOST_LINE, 0U, 0U,
                 MODE_TRACKING_SENSOR_FRESH |
                 MODE_TRACKING_SENSOR_NEW_FRAME,
                 1U);
-    CHECK(Mode_TargetAimGetPhase() == MODE_TARGET_AIM_PHASE_FOLLOW_LINE,
-          "a stale gap must reset an in-progress white confirmation");
+    CHECK(Mode_TargetAimGetPhase() ==
+              MODE_TARGET_AIM_PHASE_STOP_CONFIRM,
+          "a stale gap must keep stopped and restart white timing");
 }
 
 static void test_wide_black_stops_without_finishing(void)
