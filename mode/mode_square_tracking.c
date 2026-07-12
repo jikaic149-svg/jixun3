@@ -14,14 +14,14 @@ static float square_last_new_frame_clock_sec = 0.0f;
 static float square_filtered_error = 0.0f;
 static float square_last_turn_rpm = 0.0f;
 static float square_last_velocity_mps = 0.0f;
+static float square_turn_start_yaw_deg = 0.0f;
+static float square_turn_yaw_progress_deg = 0.0f;
 static uint8_t square_condition_active = 0U;
 static uint8_t square_refind_active = 0U;
 static uint8_t square_approach_active = 0U;
 static uint8_t square_approach_confirmed = 0U;
 static uint8_t square_filter_ready = 0U;
 static uint8_t square_corner_armed = 1U;
-static uint8_t square_corner_departed = 0U;
-static uint8_t square_corner_wide_seen = 0U;
 static uint8_t square_lost_corner_candidate = 0U;
 
 static uint8_t square_bit_count(uint8_t value)
@@ -52,6 +52,29 @@ static uint8_t square_corner_pattern(uint8_t black_mask)
 static float square_absf(float value)
 {
     return (value >= 0.0f) ? value : -value;
+}
+
+static float square_wrap_delta_deg(float delta_deg)
+{
+    while (delta_deg > 180.0f) {
+        delta_deg -= 360.0f;
+    }
+    while (delta_deg < -180.0f) {
+        delta_deg += 360.0f;
+    }
+    return delta_deg;
+}
+
+static void square_capture_turn_yaw(float chassis_yaw_deg)
+{
+    square_turn_start_yaw_deg = chassis_yaw_deg;
+    square_turn_yaw_progress_deg = 0.0f;
+}
+
+static void square_update_turn_yaw(float chassis_yaw_deg)
+{
+    square_turn_yaw_progress_deg = square_absf(square_wrap_delta_deg(
+        chassis_yaw_deg - square_turn_start_yaw_deg));
 }
 
 static float square_limit_abs(float value, float limit)
@@ -102,6 +125,20 @@ static void square_build_fixed_turn(ModeCommand_t *command)
     } else {
         Mode_TurnRightBuild(command);
     }
+    command->tracking_active = 1U;
+}
+
+static void square_build_corner_search_turn(ModeCommand_t *command)
+{
+    float search_rpm = square_absf(SQUARE_TRACKING_CORNER_SEARCH_RPM);
+
+    if (SQUARE_TRACKING_TURN_DIRECTION < 0.0f) {
+        search_rpm = -search_rpm;
+    }
+    Mode_MotionBuild(command,
+                     0.0f,
+                     BALANCE_MODE_STAND_BIAS_DEG,
+                     search_rpm);
     command->tracking_active = 1U;
 }
 
@@ -181,7 +218,7 @@ static void square_update_corner_approach(uint8_t black_mask,
     uint8_t approach_seen =
         ((square_corner_armed != 0U) &&
          (actual_velocity_mps >=
-          SQUARE_TRACKING_CORNER_MIN_FORWARD_MPS) &&
+          -SQUARE_TRACKING_CORNER_REVERSE_REJECT_MPS) &&
          (square_corner_pattern(black_mask) != 0U)) ? 1U : 0U;
 
     if (approach_seen == 0U) {
@@ -220,17 +257,6 @@ static float square_alignment_turn(void)
     return square_limit_abs(
         SQUARE_TRACKING_TURN_KP_RPM_PER_ERROR * square_filtered_error,
         BALANCE_MODE_TURN_SPEED_RPM);
-}
-
-static float square_corner_alignment_turn(void)
-{
-    float magnitude = square_absf(
-        SQUARE_TRACKING_TURN_KP_RPM_PER_ERROR * square_filtered_error);
-
-    if (magnitude > BALANCE_MODE_TURN_SPEED_RPM) {
-        magnitude = BALANCE_MODE_TURN_SPEED_RPM;
-    }
-    return (SQUARE_TRACKING_TURN_DIRECTION >= 0.0f) ? magnitude : -magnitude;
 }
 
 static void square_build_follow_command(ModeCommand_t *command, float error)
@@ -274,6 +300,7 @@ static void square_enter_wait_line(void)
     square_filter_ready = 0U;
     square_last_turn_rpm = 0.0f;
     square_last_velocity_mps = 0.0f;
+    square_turn_yaw_progress_deg = 0.0f;
     square_lost_corner_candidate = 0U;
     square_reset_corner_approach();
     square_reset_condition();
@@ -286,6 +313,7 @@ static void square_enter_fault(void)
     square_phase_elapsed_sec = 0.0f;
     square_last_turn_rpm = 0.0f;
     square_last_velocity_mps = 0.0f;
+    square_turn_yaw_progress_deg = 0.0f;
     square_reset_corner_approach();
     square_reset_condition();
     square_reset_refind();
@@ -296,6 +324,8 @@ static void square_complete_alignment(void)
     square_corner_count++;
     square_last_turn_rpm = 0.0f;
     square_last_velocity_mps = 0.0f;
+    square_turn_start_yaw_deg = 0.0f;
+    square_turn_yaw_progress_deg = 0.0f;
     square_filter_ready = 0U;
     square_corner_armed = 0U;
     square_lost_corner_candidate = 0U;
@@ -324,14 +354,14 @@ void Mode_SquareTrackingReset(void)
     square_filtered_error = 0.0f;
     square_last_turn_rpm = 0.0f;
     square_last_velocity_mps = 0.0f;
+    square_turn_start_yaw_deg = 0.0f;
+    square_turn_yaw_progress_deg = 0.0f;
     square_condition_active = 0U;
     square_refind_active = 0U;
     square_approach_active = 0U;
     square_approach_confirmed = 0U;
     square_filter_ready = 0U;
     square_corner_armed = 1U;
-    square_corner_departed = 0U;
-    square_corner_wide_seen = 0U;
     square_lost_corner_candidate = 0U;
 }
 
@@ -352,6 +382,7 @@ void Mode_SquareTrackingBuild(ModeCommand_t *command,
                               uint8_t sensor_flags,
                               uint8_t motion_settled,
                               float actual_velocity_mps,
+                              float chassis_yaw_deg,
                               float dt_sec)
 {
     uint8_t sensor_fresh;
@@ -478,7 +509,7 @@ void Mode_SquareTrackingBuild(ModeCommand_t *command,
             }
         } else if (square_condition_confirmed(
                        ((actual_velocity_mps >=
-                         SQUARE_TRACKING_CORNER_MIN_FORWARD_MPS) &&
+                         -SQUARE_TRACKING_CORNER_REVERSE_REJECT_MPS) &&
                         (square_corner_pattern(black_mask) != 0U)) ?
                        1U : 0U,
                        SQUARE_TRACKING_CORNER_CONFIRM_MS,
@@ -486,7 +517,6 @@ void Mode_SquareTrackingBuild(ModeCommand_t *command,
             square_corner_armed = 0U;
             square_phase = MODE_SQUARE_PHASE_CORNER_RUNOUT;
             square_phase_elapsed_sec = 0.0f;
-            square_corner_wide_seen = 1U;
             square_reset_corner_approach();
             square_reset_condition();
             square_last_velocity_mps =
@@ -506,7 +536,7 @@ void Mode_SquareTrackingBuild(ModeCommand_t *command,
     if (square_phase == MODE_SQUARE_PHASE_CORNER_RUNOUT) {
         square_phase_elapsed_sec += dt_sec;
         if (actual_velocity_mps <
-            -SQUARE_TRACKING_CORNER_MIN_FORWARD_MPS) {
+            -SQUARE_TRACKING_CORNER_REVERSE_REJECT_MPS) {
             square_enter_wait_line();
             square_build_hold(command);
             return;
@@ -530,7 +560,7 @@ void Mode_SquareTrackingBuild(ModeCommand_t *command,
         if (motion_settled != 0U) {
             square_phase = MODE_SQUARE_PHASE_CORNER_TURN;
             square_phase_elapsed_sec = 0.0f;
-            square_corner_departed = 0U;
+            square_capture_turn_yaw(chassis_yaw_deg);
             square_filter_ready = 0U;
             square_reset_condition();
         } else if (square_phase_elapsed_sec >=
@@ -543,7 +573,13 @@ void Mode_SquareTrackingBuild(ModeCommand_t *command,
 
     if (square_phase == MODE_SQUARE_PHASE_CORNER_TURN) {
         square_phase_elapsed_sec += dt_sec;
-        square_build_fixed_turn(command);
+        square_update_turn_yaw(chassis_yaw_deg);
+        if (square_turn_yaw_progress_deg <
+            SQUARE_TRACKING_CORNER_YAW_FULL_TURN_DEG) {
+            square_build_fixed_turn(command);
+        } else {
+            square_build_corner_search_turn(command);
+        }
 
         if (square_phase_elapsed_sec >=
             (0.001f * (float)SQUARE_TRACKING_CORNER_TURN_MAX_MS)) {
@@ -553,22 +589,9 @@ void Mode_SquareTrackingBuild(ModeCommand_t *command,
         }
         if ((sensor_new_frame == 0U) ||
             (square_phase_elapsed_sec <
-             (0.001f * (float)SQUARE_TRACKING_CORNER_TURN_MIN_MS))) {
-            return;
-        }
-
-        if (square_corner_departed == 0U) {
-            if ((error == TRACK_LOST_LINE) ||
-                (square_absf(error) >=
-                 SQUARE_TRACKING_CORNER_DEPART_ERROR) ||
-                ((square_corner_wide_seen != 0U) &&
-                 (square_phase_elapsed_sec >=
-                  (0.001f *
-                   (float)SQUARE_TRACKING_CORNER_TURN_FALLBACK_MS)) &&
-                 (error != TRACK_LOST_LINE) &&
-                 (square_corner_pattern(black_mask) == 0U))) {
-                square_corner_departed = 1U;
-            }
+             (0.001f * (float)SQUARE_TRACKING_CORNER_TURN_MIN_MS)) ||
+            (square_turn_yaw_progress_deg <
+             SQUARE_TRACKING_CORNER_YAW_REACQUIRE_DEG)) {
             return;
         }
 
@@ -596,13 +619,13 @@ void Mode_SquareTrackingBuild(ModeCommand_t *command,
                 (square_corner_pattern(black_mask) != 0U)) {
                 square_filter_ready = 0U;
                 square_reset_condition();
-                square_build_fixed_turn(command);
+                square_build_corner_search_turn(command);
                 return;
             }
             square_filter_error(error);
         }
         if (square_filter_ready == 0U) {
-            square_build_fixed_turn(command);
+            square_build_corner_search_turn(command);
             return;
         }
 
@@ -616,7 +639,9 @@ void Mode_SquareTrackingBuild(ModeCommand_t *command,
 
         if ((square_absf(square_filtered_error) <=
              SQUARE_TRACKING_CORNER_ALIGN_ERROR) &&
-            (square_absf(error) <= SQUARE_TRACKING_CORNER_ALIGN_ERROR)) {
+            (square_absf(error) <= SQUARE_TRACKING_CORNER_ALIGN_ERROR) &&
+            (actual_velocity_mps >=
+             SQUARE_TRACKING_CORNER_ALIGN_MIN_FORWARD_MPS)) {
             if (square_condition_confirmed(1U,
                                            SQUARE_TRACKING_CORNER_ALIGN_CONFIRM_MS,
                                            sensor_new_frame) != 0U) {
@@ -676,6 +701,9 @@ void Mode_SquareTrackingBuild(ModeCommand_t *command,
                 square_phase = MODE_SQUARE_PHASE_LOST_SEARCH;
                 square_phase_elapsed_sec = 0.0f;
                 square_filter_ready = 0U;
+                if (square_lost_corner_candidate != 0U) {
+                    square_capture_turn_yaw(chassis_yaw_deg);
+                }
                 square_reset_condition();
             } else {
                 square_enter_wait_line();
@@ -697,6 +725,38 @@ void Mode_SquareTrackingBuild(ModeCommand_t *command,
             square_enter_fault();
             return;
         }
+        if (square_lost_corner_candidate != 0U) {
+            square_update_turn_yaw(chassis_yaw_deg);
+            if ((square_phase_elapsed_sec <
+                 (0.001f *
+                  (float)SQUARE_TRACKING_CORNER_TURN_MIN_MS)) ||
+                (square_turn_yaw_progress_deg <
+                 SQUARE_TRACKING_CORNER_YAW_REACQUIRE_DEG)) {
+                square_filter_ready = 0U;
+                square_reset_condition();
+                if (square_turn_yaw_progress_deg <
+                    SQUARE_TRACKING_CORNER_YAW_FULL_TURN_DEG) {
+                    square_build_fixed_turn(command);
+                } else {
+                    square_build_corner_search_turn(command);
+                }
+                return;
+            }
+            if ((sensor_new_frame != 0U) &&
+                (error != TRACK_LOST_LINE) &&
+                (square_corner_pattern(black_mask) == 0U)) {
+                square_phase = MODE_SQUARE_PHASE_CORNER_ALIGN;
+                square_phase_elapsed_sec = 0.0f;
+                square_filter_ready = 0U;
+                square_reset_condition();
+            } else if (square_turn_yaw_progress_deg <
+                       SQUARE_TRACKING_CORNER_YAW_FULL_TURN_DEG) {
+                square_build_fixed_turn(command);
+            } else {
+                square_build_corner_search_turn(command);
+            }
+            return;
+        }
 
         if (sensor_new_frame != 0U) {
             if ((error == TRACK_LOST_LINE) ||
@@ -716,39 +776,23 @@ void Mode_SquareTrackingBuild(ModeCommand_t *command,
         if ((square_absf(square_filtered_error) <=
              SQUARE_TRACKING_CORNER_ALIGN_ERROR) &&
             (square_absf(error) <= SQUARE_TRACKING_CORNER_ALIGN_ERROR)) {
-            if ((square_lost_corner_candidate != 0U) &&
-                (square_phase_elapsed_sec <
-                 (0.001f *
-                  (float)SQUARE_TRACKING_CORNER_TURN_MIN_MS))) {
-                square_reset_condition();
-                square_build_fixed_turn(command);
-                return;
-            }
             square_build_hold(command);
             if (square_condition_confirmed(motion_settled,
                                            SQUARE_TRACKING_REFIND_CONFIRM_MS,
                                            sensor_new_frame) != 0U) {
-                if (square_lost_corner_candidate != 0U) {
-                    square_complete_alignment();
-                } else {
-                    square_phase = MODE_SQUARE_PHASE_FOLLOW;
-                    square_phase_elapsed_sec = 0.0f;
-                    square_filter_ready = 0U;
-                    square_last_turn_rpm = 0.0f;
-                    square_last_velocity_mps = 0.0f;
-                    square_reset_condition();
-                    square_build_follow_command(command, error);
-                }
+                square_phase = MODE_SQUARE_PHASE_FOLLOW;
+                square_phase_elapsed_sec = 0.0f;
+                square_filter_ready = 0U;
+                square_last_turn_rpm = 0.0f;
+                square_last_velocity_mps = 0.0f;
+                square_reset_condition();
+                square_build_follow_command(command, error);
             }
             return;
         }
 
         square_reset_condition();
-        if (square_lost_corner_candidate != 0U) {
-            search_turn_rpm = square_corner_alignment_turn();
-        } else {
-            search_turn_rpm = square_alignment_turn();
-        }
+        search_turn_rpm = square_alignment_turn();
         square_build_motion(command, 0.0f, search_turn_rpm);
     }
 }

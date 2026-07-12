@@ -1021,6 +1021,7 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
     uint8_t drive_pulse_brake_active;
     uint8_t drive_pulse_hold_active;
     uint8_t stop_brake_active;
+    uint8_t stop_neutral_hold_active;
     uint8_t drive_stop_edge;
     uint8_t speed_integral_safety_decay;
     uint8_t speed_integration_eligible;
@@ -1446,21 +1447,8 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
             balance_stop_brake_lockout = 1U;
         }
 
-        if ((balance_stop_brake_lockout == 0U) &&
-            (balance_stop_brake_dir == 0.0f) &&
-            (stop_brake_abs_v_mps >=
-             BALANCE_MODE_STOP_BRAKE_LOCK_ON_MPS)) {
-            balance_stop_brake_dir =
-                (measured_velocity_mps >= 0.0f) ? 1.0f : -1.0f;
-            balance_stop_brake_timer_sec = BALANCE_MODE_STOP_BRAKE_TIME_SEC;
-            if (balance_motion_state == BALANCE_MOTION_HOLD) {
-                balance_motion_state = BALANCE_MOTION_BRAKING;
-                balance_motion_settle_timer_sec = 0.0f;
-                balance_drive_actual_base_blend = 0.0f;
-                balance_drive_actual_base_lpf_rpm = 0.0f;
-            }
-        }
-
+        /* Arm only from an explicit moving-to-stop edge. Re-arming from HOLD
+         * on reverse drift caused the attitude brake to accelerate rollback. */
         if ((balance_motion_state == BALANCE_MOTION_HOLD) &&
             (balance_stop_brake_lockout != 0U) &&
             (balance_stop_brake_dir == 0.0f)) {
@@ -1509,6 +1497,12 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
         ((balance_stop_brake_dir > 0.0f) ? 0x02U : 0U) |
         ((balance_stop_brake_dir < 0.0f) ? 0x04U : 0U) |
         ((balance_stop_brake_lockout != 0U) ? 0x08U : 0U);
+    /* After the first zero crossing, keep only upright control until the
+     * wheels remain quiet; the stand outer loop must not pull back to stop. */
+    stop_neutral_hold_active =
+        ((drive_requested == 0U) &&
+         (stop_brake_active == 0U) &&
+         (balance_stop_brake_lockout != 0U)) ? 1U : 0U;
     balance_velocity_ref_ramp_mps =
         Chassis_StepTowards(balance_velocity_ref_ramp_mps,
                             target_velocity_mps,
@@ -1586,7 +1580,7 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
         ((balance_motion_state == BALANCE_MOTION_STARTING) ||
          (balance_motion_state == BALANCE_MOTION_RUNNING)) ? 1U : 0U;
 
-    if (drive_bias_mode != 0U) {
+    if ((drive_bias_mode != 0U) || (stop_neutral_hold_active != 0U)) {
         balance_position_ref_m = measured_position_m;
     }
 
@@ -1594,7 +1588,7 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
     speed_error_mps = BalanceControl_ApplyContinuousDeadband(
         speed_error_mps, BALANCE_PID_WHEEL_SPEED_DEADBAND_MPS);
     position_error_m = balance_position_ref_m - measured_position_m;
-    if (drive_bias_mode != 0U) {
+    if ((drive_bias_mode != 0U) || (stop_neutral_hold_active != 0U)) {
         position_error_m = 0.0f;
     }
     accel_error_mps2 = 0.0f - balance_accel_lpf_mps2;
@@ -1704,6 +1698,9 @@ static void Chassis_CalcBalancePidOutput(float *left_current, float *right_curre
         speed_theta_ref_deg = Chassis_LimitAbs(
             speed_theta_ref_deg,
             BALANCE_POSITION_THETA_REF_LIMIT_DEG);
+    }
+    if (stop_neutral_hold_active != 0U) {
+        speed_theta_ref_deg = 0.0f;
     }
 #if !BALANCE_MODE_DRIVE_THETA_REF_ENABLE
     if (drive_bias_mode != 0U) {
@@ -2194,6 +2191,7 @@ void Gimbal_Task(void *argument)
          * a fresh pre-control reading. */
         Mode_SetMotionSettled(chassis_motion_settled);
         Mode_SetActualVelocity(balance_pid_velocity_mps);
+        Mode_SetChassisYaw(INS_GetChassisYaw());
         Mode_SetLaserSafe(chassis_laser_safe);
         Mode_Update(now_tick);
 

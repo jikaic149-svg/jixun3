@@ -53,6 +53,16 @@ static void tick_with_frame(float error, uint8_t black_mask)
     Mode_Update(now_ms);
 }
 
+static void tick_with_feedback(float error,
+                               uint8_t black_mask,
+                               float actual_velocity_mps,
+                               float chassis_yaw_deg)
+{
+    Mode_SetActualVelocity(actual_velocity_mps);
+    Mode_SetChassisYaw(chassis_yaw_deg);
+    tick_with_frame(error, black_mask);
+}
+
 static void run_with_frames(uint32_t duration_ms,
                             uint32_t frame_period_ms,
                             float error,
@@ -77,6 +87,31 @@ static void run_without_frames(uint32_t duration_ms)
     }
 }
 
+static void run_with_feedback_frames(uint32_t duration_ms,
+                                     uint32_t frame_period_ms,
+                                     float error,
+                                     uint8_t black_mask,
+                                     float actual_velocity_mps,
+                                     float chassis_yaw_deg)
+{
+    Mode_SetActualVelocity(actual_velocity_mps);
+    Mode_SetChassisYaw(chassis_yaw_deg);
+    run_with_frames(duration_ms, frame_period_ms, error, black_mask);
+}
+
+static void tick_feedback_after(uint32_t delay_ms,
+                                float error,
+                                uint8_t black_mask,
+                                float actual_velocity_mps,
+                                float chassis_yaw_deg)
+{
+    if (delay_ms > 1U) {
+        run_without_frames(delay_ms - 1U);
+    }
+    tick_with_feedback(error, black_mask,
+                       actual_velocity_mps, chassis_yaw_deg);
+}
+
 static void enter_square_follow(void)
 {
     ModeCommand_t command;
@@ -85,6 +120,7 @@ static void enter_square_follow(void)
     Mode_Init();
     Mode_SetMotionSettled(1U);
     Mode_SetActualVelocity(0.05f);
+    Mode_SetChassisYaw(0.0f);
     Mode_Set(CHASSIS_MODE_SQUARE_TRACKING);
     Mode_SetLaserSafe(1U);
 
@@ -121,6 +157,33 @@ static void start_corner_runout(void)
           "corner runout must move straight at low speed");
     CHECK(command.laser_enabled == 0U,
           "corner runout must keep laser off");
+}
+
+static void enter_corner_turn(float start_yaw_deg)
+{
+    start_corner_runout();
+    run_with_feedback_frames(SQUARE_TRACKING_CORNER_RUNOUT_MS + 2U,
+                             20U, TRACK_LOST_LINE, 0U,
+                             0.03f, start_yaw_deg);
+    CHECK(Mode_SquareTrackingGetPhase() == MODE_SQUARE_PHASE_CORNER_BRAKE,
+          "runout completion must brake before yaw turn");
+
+    Mode_SetMotionSettled(1U);
+    tick_with_feedback(TRACK_LOST_LINE, 0U, 0.0f, start_yaw_deg);
+    CHECK(Mode_SquareTrackingGetPhase() == MODE_SQUARE_PHASE_CORNER_TURN,
+          "settled corner brake must capture yaw and enter turn");
+    Mode_SetMotionSettled(0U);
+}
+
+static void enter_corner_align(float start_yaw_deg, float end_yaw_deg)
+{
+    enter_corner_turn(start_yaw_deg);
+    run_with_feedback_frames(SQUARE_TRACKING_CORNER_TURN_MIN_MS + 20U,
+                             20U, TRACK_LOST_LINE, 0U,
+                             0.0f, end_yaw_deg);
+    tick_with_feedback(2.0f, LINE_MASK, 0.0f, end_yaw_deg);
+    CHECK(Mode_SquareTrackingGetPhase() == MODE_SQUARE_PHASE_CORNER_ALIGN,
+          "new narrow edge after yaw gate must enter alignment");
 }
 
 static void test_corner_transition_has_no_stop_pulse(void)
@@ -197,46 +260,23 @@ static void test_follow_turn_is_bounded_and_quiet_near_center(void)
           "negative deadband exit must be continuous");
 }
 
-static void complete_corner(uint8_t expected_corner_count)
+static void complete_corner(uint8_t expected_corner_count,
+                            float start_yaw_deg,
+                            float end_yaw_deg)
 {
     ModeCommand_t command;
 
-    start_corner_runout();
-    run_with_frames(SQUARE_TRACKING_CORNER_RUNOUT_MS + 2U,
-                    20U, TRACK_LOST_LINE, 0U);
-    command = get_command();
-    CHECK(Mode_SquareTrackingGetPhase() == MODE_SQUARE_PHASE_CORNER_BRAKE,
-          "runout completion must brake before turning");
-    CHECK(command.drive_enabled == 0U && command.turn_rpm == 0.0f,
-          "corner brake must use the shared hold command");
-
-    Mode_SetMotionSettled(1U);
-    tick_with_frame(TRACK_LOST_LINE, 0U);
-    CHECK(Mode_SquareTrackingGetPhase() == MODE_SQUARE_PHASE_CORNER_TURN,
-          "settled corner brake must enter fixed turn");
-    Mode_SetMotionSettled(0U);
-    run_with_frames(SQUARE_TRACKING_CORNER_TURN_MIN_MS + 20U,
-                    20U, TRACK_LOST_LINE, 0U);
-    command = get_command();
-    CHECK(command.drive_enabled == 0U && command.turn_rpm < 0.0f,
-           "default square corner must call right turn");
-    CHECK(command.turn_rpm == -BALANCE_MODE_TURN_SPEED_RPM,
-          "fixed square right turn must retain the existing turn speed");
-
-    tick_with_frame(2.0f, LINE_MASK);
-    CHECK(Mode_SquareTrackingGetPhase() == MODE_SQUARE_PHASE_CORNER_ALIGN,
-          "next non-corner line must enter alignment");
-
-    Mode_SetMotionSettled(0U);
-    tick_with_frame(2.0f, LINE_MASK);
+    enter_corner_align(start_yaw_deg, end_yaw_deg);
+    tick_with_feedback(2.0f, LINE_MASK, 0.03f, end_yaw_deg);
     command = get_command();
     CHECK(command.drive_enabled != 0U &&
               command.velocity_mps ==
                   SQUARE_TRACKING_CORNER_ALIGN_VELOCITY_MPS &&
               command.turn_rpm > 0.0f,
           "corner alignment must move forward and correct both directions");
-    run_with_frames(SQUARE_TRACKING_CORNER_ALIGN_CONFIRM_MS + 180U,
-                    20U, 0.0f, LINE_MASK);
+    run_with_feedback_frames(SQUARE_TRACKING_CORNER_ALIGN_CONFIRM_MS + 180U,
+                             20U, 0.0f, LINE_MASK,
+                             0.03f, end_yaw_deg);
     CHECK(Mode_SquareTrackingGetCornerCount() == expected_corner_count,
           "aligned side must increment one corner");
     command = get_command();
@@ -248,8 +288,9 @@ static void complete_corner(uint8_t expected_corner_count)
               "non-final corner must return to follow");
         CHECK(command.drive_enabled != 0U,
               "non-final alignment must not insert a stop pulse");
-        run_with_frames(SQUARE_TRACKING_CORNER_REARM_MS + 30U,
-                        20U, 0.0f, LINE_MASK);
+        run_with_feedback_frames(SQUARE_TRACKING_CORNER_REARM_MS + 30U,
+                                 20U, 0.0f, LINE_MASK,
+                                 0.03f, end_yaw_deg);
     }
 }
 
@@ -277,6 +318,27 @@ static void test_either_single_side_block_triggers_corner(void)
           "either isolated sensor half must identify a square corner");
 }
 
+static void test_corner_confirmation_tolerates_speed_jitter(void)
+{
+    static const float velocity_mps[] = {
+        0.006f, -0.006f, 0.0f, -0.010f
+    };
+
+    enter_square_follow();
+    Mode_SetMotionSettled(0U);
+    for (uint32_t i = 0U;
+         i < (uint32_t)(sizeof(velocity_mps) / sizeof(velocity_mps[0]));
+         i++) {
+        tick_feedback_after((i == 0U) ? 1U : 15U,
+                            -4.0f, CORNER_MASK,
+                            velocity_mps[i], 0.0f);
+    }
+
+    CHECK(Mode_SquareTrackingGetPhase() ==
+              MODE_SQUARE_PHASE_CORNER_RUNOUT,
+          "small measured-speed sign jitter must not reset corner confirmation");
+}
+
 static void test_corner_requires_continuous_frames(void)
 {
     enter_square_follow();
@@ -301,11 +363,11 @@ static void test_reversing_black_block_does_not_trigger_corner(void)
     CHECK(command.drive_enabled != 0U,
           "reverse false trigger must keep requesting forward recovery");
 
-    Mode_SetActualVelocity(0.03f);
+    Mode_SetActualVelocity(0.006f);
     run_with_frames(SQUARE_TRACKING_CORNER_CONFIRM_MS + 30U,
                     20U, -4.0f, CORNER_MASK);
     CHECK(Mode_SquareTrackingGetPhase() == MODE_SQUARE_PHASE_CORNER_RUNOUT,
-          "the same pattern may trigger only after measured forward motion");
+          "corner detection may resume once definite reverse motion ends");
 }
 
 static void test_runout_stale_fault(void)
@@ -368,37 +430,129 @@ static void test_lost_brake_allows_real_settle_delay(void)
           "settling after the real delay must still start line search");
 }
 
-static void test_fixed_turn_rejects_early_old_line(void)
+static void test_turn_rejects_line_before_minimum_time(void)
 {
     ModeCommand_t command;
 
     enter_square_follow();
-    start_corner_runout();
-    run_with_frames(SQUARE_TRACKING_CORNER_RUNOUT_MS + 2U,
-                    20U, TRACK_LOST_LINE, 0U);
-    Mode_SetMotionSettled(1U);
-    tick_with_frame(TRACK_LOST_LINE, 0U);
-    Mode_SetMotionSettled(0U);
-
-    run_with_frames(SQUARE_TRACKING_CORNER_TURN_MIN_MS - 100U,
-                    20U, 0.0f, LINE_MASK);
+    enter_corner_turn(0.0f);
+    run_with_feedback_frames(SQUARE_TRACKING_CORNER_TURN_MIN_MS - 100U,
+                             20U, 0.0f, LINE_MASK,
+                             0.0f, 90.0f);
     command = get_command();
     CHECK(Mode_SquareTrackingGetPhase() ==
               MODE_SQUARE_PHASE_CORNER_TURN,
-          "the old line must not end a fixed turn before its minimum angle");
+          "a visible line and sufficient yaw must not bypass minimum turn time");
+    CHECK(command.turn_rpm == -SQUARE_TRACKING_CORNER_SEARCH_RPM,
+          "after full yaw, an early line must keep the slow search turn");
+}
+
+static void test_turn_rejects_old_line_below_yaw_gate(void)
+{
+    ModeCommand_t command;
+
+    enter_square_follow();
+    enter_corner_turn(0.0f);
+    run_with_feedback_frames(SQUARE_TRACKING_CORNER_TURN_MIN_MS + 20U,
+                             20U, TRACK_LOST_LINE, 0U,
+                             0.0f, 80.0f);
+    tick_with_feedback(3.1f, LINE_MASK, 0.0f, 80.0f);
+    tick_with_feedback(0.0f, LINE_MASK, 0.0f, 80.0f);
+    command = get_command();
+
+    CHECK(Mode_SquareTrackingGetPhase() == MODE_SQUARE_PHASE_CORNER_TURN,
+          "old-line 3.1 to 0 sequence must not exit turn below 85 degrees");
     CHECK(command.turn_rpm == -BALANCE_MODE_TURN_SPEED_RPM,
-          "minimum-turn protection must keep calling the existing right turn");
+          "below the yaw gate the existing right-turn command must continue");
+}
+
+static void test_turn_yaw_gate_handles_wraparound(void)
+{
+    enter_square_follow();
+    enter_corner_turn(350.0f);
+    run_with_feedback_frames(SQUARE_TRACKING_CORNER_TURN_MIN_MS + 20U,
+                             20U, TRACK_LOST_LINE, 0U,
+                             0.0f, 74.0f);
+    tick_with_feedback(0.0f, LINE_MASK, 0.0f, 74.0f);
+    CHECK(Mode_SquareTrackingGetPhase() == MODE_SQUARE_PHASE_CORNER_TURN,
+          "wrapped 84 degree yaw progress must reject a visible line");
+
+    tick_with_feedback(0.0f, LINE_MASK, 0.0f, 75.0f);
+    CHECK(Mode_SquareTrackingGetPhase() == MODE_SQUARE_PHASE_CORNER_ALIGN,
+          "wrapped 350 to 75 degree progress must pass the 85 degree gate");
+}
+
+static void test_full_yaw_without_line_uses_slow_search(void)
+{
+    ModeCommand_t command;
+
+    enter_square_follow();
+    enter_corner_turn(0.0f);
+    tick_with_feedback(TRACK_LOST_LINE, 0U, 0.0f, 88.0f);
+    command = get_command();
+
+    CHECK(Mode_SquareTrackingGetPhase() == MODE_SQUARE_PHASE_CORNER_TURN,
+          "full yaw without a new line must remain in turn search");
+    CHECK(command.turn_rpm == -SQUARE_TRACKING_CORNER_SEARCH_RPM,
+          "88 degree yaw without a line must reduce to corner search rpm");
+}
+
+static void test_turn_frame_timeout_boundary(void)
+{
+    ModeCommand_t command;
+
+    enter_square_follow();
+    enter_corner_turn(0.0f);
+
+    run_without_frames(60U);
+    CHECK(Mode_SquareTrackingGetPhase() == MODE_SQUARE_PHASE_CORNER_TURN,
+          "one 60 ms frame gap must not fault a corner turn");
+    run_without_frames(TRACKING_DATA_TIMEOUT_MS - 60U);
+    CHECK(Mode_SquareTrackingGetPhase() == MODE_SQUARE_PHASE_CORNER_TURN,
+          "tracking data must remain valid at exactly 120 ms old");
+
+    tick_without_frame();
+    command = get_command();
+    CHECK(Mode_SquareTrackingGetPhase() == MODE_SQUARE_PHASE_FAULT_HOLD,
+          "tracking data must fault once it is 121 ms old");
+    CHECK(command.drive_enabled == 0U && command.turn_rpm == 0.0f,
+          "turn timeout must latch the shared safe hold command");
+}
+
+static void test_alignment_requires_measured_forward_motion(void)
+{
+    enter_square_follow();
+    enter_corner_align(0.0f, -90.0f);
+
+    run_with_feedback_frames(SQUARE_TRACKING_CORNER_ALIGN_CONFIRM_MS + 200U,
+                             20U, 0.0f, LINE_MASK,
+                             0.019f, -90.0f);
+    CHECK(Mode_SquareTrackingGetPhase() == MODE_SQUARE_PHASE_CORNER_ALIGN &&
+              Mode_SquareTrackingGetCornerCount() == 0U,
+          "centered alignment below 0.02 m/s must not count a corner");
+
+    run_with_feedback_frames(SQUARE_TRACKING_CORNER_ALIGN_CONFIRM_MS + 40U,
+                             20U, 0.0f, LINE_MASK,
+                             0.03f, -90.0f);
+    CHECK(Mode_SquareTrackingGetPhase() == MODE_SQUARE_PHASE_FOLLOW &&
+              Mode_SquareTrackingGetCornerCount() == 1U,
+          "alignment may count only after measured forward motion is present");
 }
 
 static void test_four_corner_lap(void)
 {
+    static const float yaw_deg[] = {
+        0.0f, -90.0f, -180.0f, 90.0f, 0.0f
+    };
     ModeCommand_t command;
 
     enter_square_follow();
     for (uint8_t corner = 1U;
          corner <= SQUARE_TRACKING_TARGET_CORNER_COUNT;
          corner++) {
-        complete_corner(corner);
+        complete_corner(corner,
+                        yaw_deg[corner - 1U],
+                        yaw_deg[corner]);
     }
 
     command = get_command();
@@ -454,12 +608,18 @@ int main(void)
     test_follow_turn_is_bounded_and_quiet_near_center();
     test_non_corner_masks_do_not_trigger_corner();
     test_either_single_side_block_triggers_corner();
+    test_corner_confirmation_tolerates_speed_jitter();
     test_corner_requires_continuous_frames();
     test_reversing_black_block_does_not_trigger_corner();
     test_runout_stale_fault();
     test_corner_brake_allows_real_settle_delay();
     test_lost_brake_allows_real_settle_delay();
-    test_fixed_turn_rejects_early_old_line();
+    test_turn_rejects_line_before_minimum_time();
+    test_turn_rejects_old_line_below_yaw_gate();
+    test_turn_yaw_gate_handles_wraparound();
+    test_full_yaw_without_line_uses_slow_search();
+    test_turn_frame_timeout_boundary();
+    test_alignment_requires_measured_forward_motion();
     test_four_corner_lap();
     test_short_line_loss_recovers();
     test_course_tracking_api_unchanged();

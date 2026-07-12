@@ -29,6 +29,7 @@ void Mode_SquareTrackingBuild(ModeCommand_t *command,
                               uint8_t sensor_flags,
                               uint8_t motion_settled,
                               float actual_velocity_mps,
+                              float chassis_yaw_deg,
                               float dt_sec);
 void Mode_SquareTrackingReset(void);
 

@@ -61,6 +61,7 @@ void Mode_Update(uint32_t now_ms);
 void Mode_GetCommand(ModeCommand_t *command);
 void Mode_SetMotionSettled(uint8_t settled);
 void Mode_SetActualVelocity(float velocity_mps);
+void Mode_SetChassisYaw(float yaw_deg);
 void Mode_SetLaserSafe(uint8_t safe);
 void Mode_TrackingSetSample(float error, uint8_t black_count,
                             uint8_t black_mask, uint32_t now_ms);

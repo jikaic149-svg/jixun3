@@ -22,6 +22,7 @@ static uint32_t tracking_consumed_generation = 0U;
 static uint8_t tracking_wait_for_new_frame = 0U;
 static volatile uint8_t mode_motion_settled = 0U;
 static volatile float mode_actual_velocity_mps = 0.0f;
+static volatile float mode_chassis_yaw_deg = 0.0f;
 static volatile uint8_t mode_laser_safe = 0U;
 static uint32_t mode_last_update_ms = 0U;
 
@@ -85,6 +86,7 @@ void Mode_Init(void)
     tracking_wait_for_new_frame = 0U;
     mode_motion_settled = 0U;
     mode_actual_velocity_mps = 0.0f;
+    mode_chassis_yaw_deg = 0.0f;
     mode_laser_safe = 0U;
     mode_last_update_ms = 0U;
     Mode_TrackingReset();
@@ -191,6 +193,7 @@ void Mode_Update(uint32_t now_ms)
                                      input.black_mask,
                                      sensor_flags, mode_motion_settled,
                                      mode_actual_velocity_mps,
+                                     mode_chassis_yaw_deg,
                                      dt_sec);
         }
         break;
@@ -220,6 +223,11 @@ void Mode_SetMotionSettled(uint8_t settled)
 void Mode_SetActualVelocity(float velocity_mps)
 {
     mode_actual_velocity_mps = velocity_mps;
+}
+
+void Mode_SetChassisYaw(float yaw_deg)
+{
+    mode_chassis_yaw_deg = yaw_deg;
 }
 
 void Mode_SetLaserSafe(uint8_t safe)
