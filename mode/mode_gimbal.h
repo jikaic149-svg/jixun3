@@ -23,6 +23,7 @@ void Mode_GimbalSet(GimbalMode_e mode);
 GimbalMode_e Mode_GimbalGet(void);
 void Mode_GimbalSetTargetOffsetDeg(float offset_deg);
 void Mode_GimbalAddTargetOffsetDeg(float delta_deg);
+float Mode_GimbalShapeVisionErrorPx(int16_t error_px);
 void Mode_GimbalSetTargetFromEncoderDeg(float encoder_angle_deg,
                                         float correction_deg);
 void Mode_GimbalSetChassisSpeedFeedforward(float velocity_mps,

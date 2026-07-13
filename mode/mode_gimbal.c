@@ -87,6 +87,8 @@ void Mode_GimbalInit(void)
 
 void Mode_GimbalSet(GimbalMode_e mode)
 {
+    GimbalMode_e previous_mode = gimbal_mode;
+
     if (mode > GIMBAL_MODE_AIM) {
         mode = GIMBAL_MODE_RELAX;
     }
@@ -106,7 +108,9 @@ void Mode_GimbalSet(GimbalMode_e mode)
     } else if (mode == GIMBAL_MODE_HOLD) {
         gimbal_target_offset_deg = 0.0f;
         gimbal_capture_center = 1U;
-    } else if (gimbal_center_valid == 0U) {
+    } else if ((previous_mode == GIMBAL_MODE_RELAX) ||
+               (gimbal_center_valid == 0U)) {
+        gimbal_target_offset_deg = 0.0f;
         gimbal_capture_center = 1U;
     }
 }
@@ -127,6 +131,27 @@ void Mode_GimbalAddTargetOffsetDeg(float delta_deg)
     Mode_GimbalSetTargetOffsetDeg(gimbal_target_offset_deg + delta_deg);
 }
 
+float Mode_GimbalShapeVisionErrorPx(int16_t error_px)
+{
+    float signed_error_px = (float)error_px;
+    float abs_error_px = gimbal_absf(signed_error_px);
+    float deadband_px = (float)VISION_YAW_DEADBAND_PX;
+    float transition_px = VISION_YAW_FULL_RESPONSE_PX - deadband_px;
+    float blend;
+
+    if (abs_error_px <= deadband_px) {
+        return 0.0f;
+    }
+    if ((transition_px <= 0.001f) ||
+        (abs_error_px >= VISION_YAW_FULL_RESPONSE_PX)) {
+        return signed_error_px;
+    }
+
+    blend = (abs_error_px - deadband_px) / transition_px;
+    blend = blend * blend * (3.0f - 2.0f * blend);
+    return signed_error_px * blend;
+}
+
 void Mode_GimbalSetTargetFromEncoderDeg(float encoder_angle_deg,
                                         float correction_deg)
 {
@@ -141,6 +166,9 @@ void Mode_GimbalSetTargetFromEncoderDeg(float encoder_angle_deg,
         gimbal_center_valid = 1U;
         gimbal_capture_center = 0U;
         gimbal_target_offset_deg = 0.0f;
+    }
+    if (correction_deg == 0.0f) {
+        return;
     }
 
     target_angle_deg = gimbal_wrap_angle(encoder_angle_deg + correction_deg);
@@ -242,8 +270,16 @@ void Mode_GimbalUpdate(float encoder_angle_deg,
                GIMBAL_YAW_INTEGRAL_ZONE_DEG) {
         gimbal_integral_a = 0.0f;
     } else {
-        gimbal_integral_a +=
-            GIMBAL_YAW_KI_A_PER_DEG_S * control_error_deg * dt_sec;
+        if ((gimbal_integral_a * control_error_deg) < 0.0f) {
+            gimbal_integral_a = 0.0f;
+        }
+        if (gimbal_absf(gimbal_filtered_speed_rpm) <
+            GIMBAL_YAW_INTEGRAL_MAX_SPEED_RPM) {
+            gimbal_integral_a +=
+                GIMBAL_YAW_KI_A_PER_DEG_S * control_error_deg * dt_sec;
+        } else {
+            gimbal_integral_a *= GIMBAL_YAW_INTEGRAL_MOVING_DECAY;
+        }
         gimbal_integral_a =
             gimbal_limit(gimbal_integral_a, GIMBAL_YAW_INTEGRAL_LIMIT_A);
     }
@@ -252,8 +288,19 @@ void Mode_GimbalUpdate(float encoder_angle_deg,
     if ((control_error_deg != 0.0f) &&
         (gimbal_absf(gimbal_filtered_speed_rpm) <
          GIMBAL_YAW_STATIC_FF_MAX_SPEED_RPM)) {
+        float abs_control_error_deg = gimbal_absf(control_error_deg);
         float abs_speed_rpm = gimbal_absf(gimbal_filtered_speed_rpm);
-        float static_scale = 1.0f;
+        float error_scale = 1.0f;
+        float speed_scale = 1.0f;
+
+        if (GIMBAL_YAW_STATIC_FF_FULL_ERROR_DEG > 0.001f) {
+            error_scale =
+                abs_control_error_deg /
+                GIMBAL_YAW_STATIC_FF_FULL_ERROR_DEG;
+            if (error_scale > 1.0f) {
+                error_scale = 1.0f;
+            }
+        }
 
         if (abs_speed_rpm > GIMBAL_YAW_STATIC_FF_FULL_SPEED_RPM) {
             float taper_span_rpm =
@@ -261,20 +308,22 @@ void Mode_GimbalUpdate(float encoder_angle_deg,
                 GIMBAL_YAW_STATIC_FF_FULL_SPEED_RPM;
 
             if (taper_span_rpm > 0.001f) {
-                static_scale =
+                speed_scale =
                     (GIMBAL_YAW_STATIC_FF_MAX_SPEED_RPM - abs_speed_rpm) /
                     taper_span_rpm;
             } else {
-                static_scale = 0.0f;
+                speed_scale = 0.0f;
             }
-            static_scale = gimbal_limit(static_scale, 1.0f);
-            if (static_scale < 0.0f) {
-                static_scale = 0.0f;
+            speed_scale = gimbal_limit(speed_scale, 1.0f);
+            if (speed_scale < 0.0f) {
+                speed_scale = 0.0f;
             }
         }
-        static_feedforward_a = (control_error_deg > 0.0f) ?
-                               GIMBAL_YAW_STATIC_FF_A * static_scale :
-                               -GIMBAL_YAW_STATIC_FF_A * static_scale;
+        static_feedforward_a =
+            GIMBAL_YAW_STATIC_FF_A * error_scale * speed_scale;
+        if (control_error_deg < 0.0f) {
+            static_feedforward_a = -static_feedforward_a;
+        }
     }
 
     output_current_a =

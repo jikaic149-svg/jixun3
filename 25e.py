@@ -18,11 +18,11 @@ def log_e(m,s): _log(3,m,s)
 # 参数
 # =============================================================================
 CAM_W, CAM_H = 320, 240
-VISION_BUILD_ID = "HRECT_20260712_2"
+VISION_BUILD_ID = "HRECT_20260712_3"
 LOCK_MAX_JUMP = 80
 ROI_SIZE = 30 # 缩小放大镜尺寸，降低边缘与反光干扰
 CORNER_DEADZONE_SQ = 16  # 角点死区半径²（4px），小于此距离时复用上帧角点
-SMOOTH_ALPHA = 0.25       # 中心点EMA平滑系数 (0=极平滑/高延迟, 1=无平滑/原始值)
+SMOOTH_ALPHA = 0.55       # 中心点EMA平滑系数 (0=极平滑/高延迟, 1=无平滑/原始值)
 
 # MaixVision 视觉调参区。VISION 页面直接显示 tape_bin 二值图。
 BINARY_GRAY_MIN = 0

@@ -13,9 +13,16 @@ static float target_aim_white_start_sec = 0.0f;
 static float target_aim_stop_abort_start_sec = 0.0f;
 static float target_aim_probe_elapsed_sec = 0.0f;
 static float target_aim_follow_wide_elapsed_sec = 0.0f;
+static float target_aim_last_line_error = 0.0f;
 static uint8_t target_aim_line_confirming = 0U;
 static uint8_t target_aim_white_confirming = 0U;
 static uint8_t target_aim_stop_abort_confirming = 0U;
+static uint8_t target_aim_finish_entry_armed = 0U;
+
+static float target_aim_absf(float value)
+{
+    return (value >= 0.0f) ? value : -value;
+}
 
 static void target_aim_build_hold(ModeCommand_t *command)
 {
@@ -51,6 +58,18 @@ static void target_aim_reset_stop_abort_confirmation(void)
 static void target_aim_reset_wide_probe(void)
 {
     target_aim_follow_wide_elapsed_sec = 0.0f;
+}
+
+static void target_aim_record_line(float error, uint8_t sensor_new_frame)
+{
+    if (sensor_new_frame == 0U) {
+        return;
+    }
+
+    target_aim_last_line_error = error;
+    target_aim_finish_entry_armed =
+        (target_aim_absf(error) <= TARGET_AIM_FINISH_ENTRY_MAX_ERROR) ?
+        1U : 0U;
 }
 
 static void target_aim_reset_follow_state(void)
@@ -113,6 +132,24 @@ static void target_aim_build_wide_start_probe(ModeCommand_t *command)
     target_aim_force_task_flags(command);
 }
 
+static void target_aim_build_lost_recovery(ModeCommand_t *command,
+                                           uint8_t sensor_flags,
+                                           float dt_sec)
+{
+    float recovery_limit_sec =
+        0.001f * (float)TARGET_AIM_WIDE_FOLLOW_PROBE_MAX_MS;
+
+    if (target_aim_follow_wide_elapsed_sec >= recovery_limit_sec) {
+        return;
+    }
+
+    target_aim_follow_wide_elapsed_sec += dt_sec;
+    target_aim_build_line_follow(command,
+                                 target_aim_last_line_error,
+                                 sensor_flags,
+                                 dt_sec);
+}
+
 void Mode_TargetAimReset(void)
 {
     target_aim_phase = MODE_TARGET_AIM_PHASE_WAIT_CALIBRATION;
@@ -122,9 +159,11 @@ void Mode_TargetAimReset(void)
     target_aim_stop_abort_start_sec = 0.0f;
     target_aim_probe_elapsed_sec = 0.0f;
     target_aim_follow_wide_elapsed_sec = 0.0f;
+    target_aim_last_line_error = 0.0f;
     target_aim_line_confirming = 0U;
     target_aim_white_confirming = 0U;
     target_aim_stop_abort_confirming = 0U;
+    target_aim_finish_entry_armed = 0U;
 }
 
 ModeTargetAimPhase_e Mode_TargetAimGetPhase(void)
@@ -166,8 +205,7 @@ void Mode_TargetAimBuild(ModeCommand_t *command,
          (black_count > 0U) &&
          (black_count <= TARGET_AIM_LINE_BLACK_COUNT_MAX)) ? 1U : 0U;
     all_white =
-        ((error == TRACK_LOST_LINE) &&
-         (black_count == 0U) &&
+        ((black_count == 0U) &&
          (black_mask == 0U)) ? 1U : 0U;
     wide_black =
         ((error != TRACK_LOST_LINE) &&
@@ -208,10 +246,12 @@ void Mode_TargetAimBuild(ModeCommand_t *command,
         }
         if (sensor_fresh == 0U) {
             target_aim_reset_line_confirmation();
+            target_aim_finish_entry_armed = 0U;
             return;
         }
         if (all_white != 0U) {
             target_aim_reset_line_confirmation();
+            target_aim_finish_entry_armed = 0U;
             return;
         }
         if (line_visible != 0U) {
@@ -222,6 +262,7 @@ void Mode_TargetAimBuild(ModeCommand_t *command,
                 &target_aim_line_confirming,
                 &target_aim_line_start_sec);
 
+            target_aim_record_line(error, sensor_new_frame);
             target_aim_build_line_follow(command, error, sensor_flags, dt_sec);
             if (line_confirmed != 0U) {
                 target_aim_phase = MODE_TARGET_AIM_PHASE_FOLLOW_LINE;
@@ -239,6 +280,7 @@ void Mode_TargetAimBuild(ModeCommand_t *command,
         if ((wide_black != 0U) &&
             (target_aim_probe_elapsed_sec <
              (0.001f * (float)TARGET_AIM_WIDE_START_PROBE_MAX_MS))) {
+            target_aim_finish_entry_armed = 0U;
             target_aim_probe_elapsed_sec += dt_sec;
             target_aim_build_wide_start_probe(command);
         }
@@ -257,26 +299,32 @@ void Mode_TargetAimBuild(ModeCommand_t *command,
             return;
         }
 
-        if ((all_white != 0U) && (sensor_new_frame != 0U)) {
-            target_aim_phase = MODE_TARGET_AIM_PHASE_STOP_CONFIRM;
-            target_aim_reset_white_confirmation();
-            target_aim_reset_stop_abort_confirmation();
-            (void)target_aim_confirm_on_new_frame(
-                1U,
-                1U,
-                TARGET_AIM_WHITE_CONFIRM_MS,
-                &target_aim_white_confirming,
-                &target_aim_white_start_sec);
-            target_aim_build_hold(command);
+        if ((all_white != 0U) &&
+            (target_aim_finish_entry_armed != 0U)) {
+            if (target_aim_confirm_on_new_frame(
+                    1U,
+                    sensor_new_frame,
+                    TARGET_AIM_WHITE_CONFIRM_MS,
+                    &target_aim_white_confirming,
+                    &target_aim_white_start_sec) != 0U) {
+                target_aim_phase = MODE_TARGET_AIM_PHASE_STOP_CONFIRM;
+                target_aim_reset_white_confirmation();
+                target_aim_reset_stop_abort_confirmation();
+                target_aim_finish_entry_armed = 0U;
+            }
             return;
         }
 
         if (line_visible != 0U) {
+            target_aim_reset_white_confirmation();
             target_aim_reset_wide_probe();
+            target_aim_record_line(error, sensor_new_frame);
             target_aim_build_line_follow(command, error, sensor_flags, dt_sec);
             return;
         }
 
+        target_aim_reset_white_confirmation();
+        target_aim_finish_entry_armed = 0U;
         if (wide_black != 0U) {
             if (target_aim_follow_wide_elapsed_sec <
                 (0.001f * (float)TARGET_AIM_WIDE_FOLLOW_PROBE_MAX_MS)) {
@@ -286,7 +334,11 @@ void Mode_TargetAimBuild(ModeCommand_t *command,
             return;
         }
 
-        target_aim_reset_wide_probe();
+        /* A line that walked off one side produces mask=0 just like a real
+         * white finish. Continue the shared line controller with the last
+         * measured edge error for a bounded interval instead of latching a
+         * false stop. */
+        target_aim_build_lost_recovery(command, sensor_flags, dt_sec);
         return;
 
     case MODE_TARGET_AIM_PHASE_STOP_CONFIRM:
@@ -325,6 +377,7 @@ void Mode_TargetAimBuild(ModeCommand_t *command,
                     &target_aim_stop_abort_start_sec) != 0U) {
                 target_aim_phase = MODE_TARGET_AIM_PHASE_FOLLOW_LINE;
                 target_aim_reset_wide_probe();
+                target_aim_record_line(error, sensor_new_frame);
                 target_aim_build_line_follow(
                     command, error, sensor_flags, dt_sec);
             }

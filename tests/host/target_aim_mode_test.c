@@ -195,16 +195,22 @@ static void test_white_confirmation_and_latched_stop(void)
     CHECK(command.drive_enabled != 0U,
           "line following must command forward motion");
 
-    command = build(TRACK_LOST_LINE, 0U, 0U,
+    command = build(0.75f, 0U, 0U,
                     MODE_TRACKING_SENSOR_FRESH |
                     MODE_TRACKING_SENSOR_NEW_FRAME,
                     1U);
     CHECK(Mode_TargetAimGetPhase() ==
-              MODE_TARGET_AIM_PHASE_STOP_CONFIRM,
-          "first white frame must enter stop confirmation");
+              MODE_TARGET_AIM_PHASE_FOLLOW_LINE,
+          "first centered white frame must remain in finish confirmation");
     CHECK(command.drive_enabled == 0U && command.turn_rpm == 0.0f &&
               line_follow_calls == calls_before_white,
-          "stop confirmation must not reuse an old turn command");
+          "finish confirmation must stop without reusing an old turn command");
+
+    run_frames(TARGET_AIM_WHITE_CONFIRM_MS + 30U,
+               10U, TRACK_LOST_LINE, 0U, 0U, 1U);
+    CHECK(Mode_TargetAimGetPhase() ==
+              MODE_TARGET_AIM_PHASE_STOP_CONFIRM,
+          "only continuous centered all-white frames may enter stop confirmation");
 
     command = build(0.25f, 1U, 0x08U,
                     MODE_TRACKING_SENSOR_FRESH |
@@ -230,7 +236,7 @@ static void test_white_confirmation_and_latched_stop(void)
     CHECK(Mode_TargetAimGetPhase() == MODE_TARGET_AIM_PHASE_FOLLOW_LINE,
           "only a continuous normal line may abort stop confirmation");
 
-    run_frames(TARGET_AIM_WHITE_CONFIRM_MS + 30U,
+    run_frames(2U * TARGET_AIM_WHITE_CONFIRM_MS + 30U,
                10U, TRACK_LOST_LINE, 0U, 0U, 1U);
     CHECK(Mode_TargetAimGetPhase() == MODE_TARGET_AIM_PHASE_AIM_HOLD,
           "continuous all-white frames must enter aim hold");
@@ -304,8 +310,8 @@ static void test_stale_data_stops_without_finishing(void)
     CHECK(command.drive_enabled == 0U,
           "first white frame must stop immediately");
     CHECK(Mode_TargetAimGetPhase() ==
-              MODE_TARGET_AIM_PHASE_STOP_CONFIRM,
-          "white candidate must enter stop confirmation");
+              MODE_TARGET_AIM_PHASE_FOLLOW_LINE,
+          "unconfirmed white must remain in line-follow phase");
 
     (void)build(TRACK_LOST_LINE, 0U, 0U, 0U, 1U);
     (void)build(TRACK_LOST_LINE, 0U, 0U,
@@ -313,8 +319,58 @@ static void test_stale_data_stops_without_finishing(void)
                 MODE_TRACKING_SENSOR_NEW_FRAME,
                 1U);
     CHECK(Mode_TargetAimGetPhase() ==
-              MODE_TARGET_AIM_PHASE_STOP_CONFIRM,
-          "a stale gap must keep stopped and restart white timing");
+              MODE_TARGET_AIM_PHASE_FOLLOW_LINE,
+          "a stale gap must restart white timing without finishing");
+}
+
+static void test_edge_loss_uses_bounded_line_recovery(void)
+{
+    ModeCommand_t command;
+    uint32_t calls_before_loss;
+
+    enter_follow_line();
+    command = build(5.0f, 1U, 0x80U,
+                    MODE_TRACKING_SENSOR_FRESH |
+                    MODE_TRACKING_SENSOR_NEW_FRAME,
+                    1U);
+    CHECK(command.drive_enabled != 0U,
+          "an edge line must remain under line-follow control");
+    calls_before_loss = line_follow_calls;
+
+    command = build(TRACK_LOST_LINE, 0U, 0U,
+                    MODE_TRACKING_SENSOR_FRESH |
+                    MODE_TRACKING_SENSOR_NEW_FRAME,
+                    1U);
+    CHECK(Mode_TargetAimGetPhase() == MODE_TARGET_AIM_PHASE_FOLLOW_LINE,
+          "edge loss must not enter stop confirmation");
+    CHECK(command.drive_enabled != 0U && command.turn_rpm > 0.0f &&
+              line_follow_calls > calls_before_loss,
+          "edge loss must continue shared line-follow in the last direction");
+
+    command = build(0.0f, 0U, 0U,
+                    MODE_TRACKING_SENSOR_FRESH |
+                    MODE_TRACKING_SENSOR_NEW_FRAME,
+                    1U);
+    CHECK(command.drive_enabled != 0U,
+          "an ambiguous mask=0 frame must not latch a permanent hold");
+
+    run_frames(TARGET_AIM_WIDE_FOLLOW_PROBE_MAX_MS + 30U,
+               10U, TRACK_LOST_LINE, 0U, 0U, 1U);
+    command = build(TRACK_LOST_LINE, 0U, 0U,
+                    MODE_TRACKING_SENSOR_FRESH |
+                    MODE_TRACKING_SENSOR_NEW_FRAME,
+                    1U);
+    CHECK(command.drive_enabled == 0U && command.turn_rpm == 0.0f,
+          "persistent edge loss must stop after the bounded recovery window");
+    CHECK(Mode_TargetAimGetPhase() == MODE_TARGET_AIM_PHASE_FOLLOW_LINE,
+          "lost-recovery timeout must not masquerade as a detected finish");
+
+    command = build(-0.5f, 2U, 0x18U,
+                    MODE_TRACKING_SENSOR_FRESH |
+                    MODE_TRACKING_SENSOR_NEW_FRAME,
+                    1U);
+    CHECK(command.drive_enabled != 0U,
+          "a real line must remain recoverable after loss timeout");
 }
 
 static void test_wide_black_stops_without_finishing(void)
@@ -357,6 +413,7 @@ int main(void)
     test_wide_black_start_probe_is_bounded();
     test_stale_data_stops_without_finishing();
     test_wide_black_stops_without_finishing();
+    test_edge_loss_uses_bounded_line_recovery();
 
     if (failures != 0) {
         printf("%d target aim assertion(s) failed\n", failures);

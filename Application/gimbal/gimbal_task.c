@@ -2133,18 +2133,15 @@ static void Gimbal_UpdateYawMotor(uint32_t now_tick)
                 (feedback_ready != 0U) &&
                 (gimbal_yaw_motor.enabled != 0U) &&
                 (emergency_stop == 0U)) {
-                int16_t corrected_dx = vision_dx;
+                float corrected_dx;
 
                 vision_last_valid_tick = now_tick;
                 vision_had_valid = 1U;
                 vision_tracking_valid = 1U;
                 Mode_SetTargetVisionReady(1U);
-                if ((corrected_dx >= -VISION_YAW_DEADBAND_PX) &&
-                    (corrected_dx <= VISION_YAW_DEADBAND_PX)) {
-                    corrected_dx = 0;
-                }
+                corrected_dx = Mode_GimbalShapeVisionErrorPx(vision_dx);
                 correction_deg =
-                    atanf((VISION_YAW_SIGN * (float)corrected_dx) /
+                    atanf((VISION_YAW_SIGN * corrected_dx) /
                           VISION_YAW_FOCAL_LENGTH_PX) *
                     57.29577951308232f;
                 Mode_GimbalSet(GIMBAL_MODE_AIM);
